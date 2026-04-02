@@ -104,24 +104,29 @@ function buildRelayUrl(
   return relayUrl
 }
 
-function createRelayRequest(
+function createRelayRequestFactory(
   request: Request,
   relayUrl: URL,
-  signal: AbortSignal,
-): Request {
-  const init: RequestInit & { duplex?: 'half' } = {
-    method: request.method,
-    headers: createRelayHeaders(request.headers),
-    redirect: 'manual',
-    signal,
-  }
+  bufferedBody: ArrayBuffer | null,
+): (signal: AbortSignal) => Request {
+  const headers = createRelayHeaders(request.headers)
+  const method = request.method
 
-  if (request.body !== null && request.method !== 'GET' && request.method !== 'HEAD') {
-    init.body = request.body
-    init.duplex = 'half'
-  }
+  return (signal: AbortSignal) => {
+    const init: RequestInit & { duplex?: 'half' } = {
+      method,
+      headers,
+      redirect: 'manual',
+      signal,
+    }
 
-  return new Request(relayUrl, init)
+    if (bufferedBody !== null) {
+      init.body = bufferedBody
+      init.duplex = 'half'
+    }
+
+    return new Request(relayUrl, init)
+  }
 }
 
 function createTimedResponseBody(
@@ -177,26 +182,49 @@ function createClientResponse(response: Response, timeoutMs: number): Response {
   })
 }
 
+const RELAY_RETRY_DELAYS_MS = [0, 500, 1000]
+
 async function fetchRelayResponse(
-  relayRequest: Request,
+  createRequest: (signal: AbortSignal) => Request,
   fetchImplementation: FetchImplementation,
   timeoutMs: number,
-  abortController: AbortController,
 ): Promise<Response> {
-  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  const maxAttempts = RELAY_RETRY_DELAYS_MS.length + 1
+  let lastError: unknown
 
-  try {
-    return await new Promise<Response>((resolve, reject) => {
-      timeoutId = setTimeout(() => {
-        abortController.abort()
-        reject(new DispatchError(504, 'RELAY_CONNECT_TIMEOUT', '内部 relay 连接超时'))
-      }, timeoutMs)
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    if (attempt > 0) {
+      const delay = RELAY_RETRY_DELAYS_MS[attempt - 1]
+      if (delay > 0) {
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
+      console.info('[agent-dispatch] relay connect retry', { attempt, delay })
+    }
 
-      fetchImplementation(relayRequest).then(resolve, reject)
-    })
-  } finally {
-    clearTimeout(timeoutId)
+    const abortController = new AbortController()
+    let timeoutId: ReturnType<typeof setTimeout> | undefined
+
+    try {
+      return await new Promise<Response>((resolve, reject) => {
+        timeoutId = setTimeout(() => {
+          abortController.abort()
+          reject(new DispatchError(504, 'RELAY_CONNECT_TIMEOUT', '内部 relay 连接超时'))
+        }, timeoutMs)
+
+        fetchImplementation(createRequest(abortController.signal)).then(resolve, reject)
+      })
+    } catch (error) {
+      lastError = error
+      // 仅对 relay 连接超时重试，其他错误立即抛出
+      if (!(error instanceof DispatchError && error.code === 'RELAY_CONNECT_TIMEOUT')) {
+        throw error
+      }
+    } finally {
+      clearTimeout(timeoutId)
+    }
   }
+
+  throw lastError
 }
 
 export async function handleDispatchRequest(
@@ -279,19 +307,20 @@ export async function handleDispatchRequest(
       targetAuthority: ingress.authority,
     })
 
-    const abortController = new AbortController()
     const relayUrl = buildRelayUrl(
       proxyBaseUrl,
       config.dispatchSecret,
       ingress.authority,
       ingress.upstreamUrl,
     )
-    const relayRequest = createRelayRequest(request, relayUrl, abortController.signal)
+    const hasBody = request.body !== null && request.method !== 'GET' && request.method !== 'HEAD'
+    const bufferedBody = hasBody ? await new Response(request.body).arrayBuffer() : null
+    const createRelayRequest = createRelayRequestFactory(request, relayUrl, bufferedBody)
+
     const relayResponse = await fetchRelayResponse(
-      relayRequest,
+      createRelayRequest,
       fetchImplementation,
       config.relayConnectTimeoutMs,
-      abortController,
     )
 
     // 负向缓存：记录上游响应

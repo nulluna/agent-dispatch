@@ -353,7 +353,7 @@ describe('handleDispatchRequest', () => {
     expect(new URL(relayRequest.url).host).toBe('proxy-a.internal')
   })
 
-  it('returns a timeout error when the relay connection exceeds the configured limit', async () => {
+  it('returns a timeout error when the relay connection exceeds the configured limit after all retries', async () => {
     const state = createDispatchState()
     const fetchSpy = vi.fn(() => new Promise<Response>(() => undefined))
 
@@ -365,7 +365,8 @@ describe('handleDispatchRequest', () => {
     )
 
     expect(response.status).toBe(504)
-    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    // 1 initial + 3 retries (delays: 0ms, 500ms, 1000ms)
+    expect(fetchSpy).toHaveBeenCalledTimes(4)
     await expect(response.json()).resolves.toMatchObject({
       error: {
         code: 'RELAY_CONNECT_TIMEOUT',
