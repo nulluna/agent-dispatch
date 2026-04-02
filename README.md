@@ -88,6 +88,69 @@ POST /ssl/api.openai.com/v1/responses
 | `RELAY_CONNECT_TIMEOUT_MS` | 否 | 内部 relay 连接超时（毫秒） |
 | `RELAY_RESPONSE_TIMEOUT_MS` | 否 | 内部 relay 响应流超时（毫秒） |
 
+## 本地开发环境变量
+
+本地运行 `npm run dev` 时，实际执行的是 `wrangler dev`。`agent-dispatch` 运行时读取的是 Worker `env` 绑定，因此本地开发请将环境变量写在与 `wrangler.toml` 同目录的 `.dev.vars` 文件中。
+
+不要把真实 `DISPATCH_SECRET` 或其他敏感值直接手动写进 `wrangler.toml`。`wrangler.toml` 是版本控制文件，改完后很容易误提交，导致 secret 泄漏。
+
+也不要用 `cp wrangler.toml .dev.vars` 这种方式生成本地配置。两者格式不同：
+- `wrangler.toml` 是 TOML 配置文件
+- `.dev.vars` 是 dotenv 文件
+
+请直接从项目自带模板复制：
+
+```bash
+cp .dev.vars.example .dev.vars
+```
+
+然后按需填写真实值，再启动本地开发：
+
+```bash
+npm run dev
+```
+
+`.dev.vars.example` 内容如下：
+
+```dotenv
+AGENTPROXY_POOL="https://a.example.com,https://b.example.com"
+DISPATCH_SECRET="replace-with-your-shared-secret"
+DISPATCH_STRATEGY="poll"
+RELAY_CONNECT_TIMEOUT_MS="10000"
+RELAY_RESPONSE_TIMEOUT_MS="30000"
+```
+
+## 本地模拟 production 环境
+
+如果你想在本地按 `production` 环境启动，不要复用 `.dev.vars`，而是单独创建 `.dev.vars.production`：
+
+```bash
+cp .dev.vars.example .dev.vars.production
+npm run dev -- --env production
+```
+
+注意：
+- `.dev.vars.production` 需要把必填项全部写完整
+- `wrangler dev --env production` 读取 `.dev.vars.production` 时，不会再合并 `.dev.vars`
+
+## Cloudflare 生产部署
+
+建议把生产环境的运行时配置放到 Cloudflare Worker 的 Variables / Secrets 中，不要把真实值提交到仓库。
+
+推荐至少将以下两个值按 secret 配置：
+- `DISPATCH_SECRET`
+- `AGENTPROXY_POOL`
+
+命令示例：
+
+```bash
+npx wrangler secret put DISPATCH_SECRET --env production
+npx wrangler secret put AGENTPROXY_POOL --env production
+npx wrangler deploy --env production
+```
+
+`DISPATCH_STRATEGY`、`RELAY_CONNECT_TIMEOUT_MS` 和 `RELAY_RESPONSE_TIMEOUT_MS` 没有配置时会回退到代码默认值；如果你需要为 `production` 显式覆盖它们，可以在 Cloudflare Dashboard 中为 `production` 环境单独设置。
+
 ## 透明转发边界
 
 agent-dispatch 会尽量保留以下内容：
