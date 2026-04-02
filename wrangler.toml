@@ -1,0 +1,10 @@
+name = "agent-dispatch"
+main = "src/index.ts"
+compatibility_date = "2026-04-01"
+
+[vars]
+AGENTPROXY_POOL = ""
+DISPATCH_SECRET = ""
+DISPATCH_STRATEGY = "poll"
+RELAY_CONNECT_TIMEOUT_MS = "10000"
+RELAY_RESPONSE_TIMEOUT_MS = "30000"
