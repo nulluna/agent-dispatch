@@ -8,12 +8,12 @@
 
 ```mermaid
 graph LR
-    subgraph 本地网络
+    subgraph local["本地网络"]
         App[应用程序]
         AD[agent-dispatch]
     end
 
-    subgraph 代理池 — 公网 / 边缘节点
+    subgraph pool["代理池 — 公网 / 边缘节点"]
         AP1[agent-proxy-1]
         AP2[agent-proxy-2]
         AP3[agent-proxy-N]
