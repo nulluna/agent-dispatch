@@ -4,16 +4,19 @@ export interface DispatchEnv {
   AGENTPROXY_POOL?: string
   DISPATCH_SECRET?: string
   DISPATCH_STRATEGY?: string
+  LOG_LEVEL?: string
   RELAY_CONNECT_TIMEOUT_MS?: string
   RELAY_RESPONSE_TIMEOUT_MS?: string
 }
 
 export type DispatchStrategy = 'poll' | 'hash'
+export type LogLevel = 'info' | 'debug'
 
 export interface RuntimeConfig {
   agentproxyPool: URL[]
   dispatchSecret: string
   dispatchStrategy: DispatchStrategy
+  logLevel: LogLevel
   relayConnectTimeoutMs: number
   relayResponseTimeoutMs: number
 }
@@ -40,6 +43,16 @@ function parseDispatchStrategy(value?: string): DispatchStrategy {
   }
 
   throw new DispatchError(500, 'INVALID_CONFIGURATION', 'DISPATCH_STRATEGY 配置无效')
+}
+
+function parseLogLevel(value?: string): LogLevel {
+  const normalized = value?.trim().toLowerCase() ?? 'info'
+
+  if (normalized === 'info' || normalized === 'debug') {
+    return normalized
+  }
+
+  throw new DispatchError(500, 'INVALID_CONFIGURATION', 'LOG_LEVEL 配置无效')
 }
 
 function parseAgentproxyPool(value?: string): URL[] {
@@ -80,6 +93,7 @@ export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
     agentproxyPool: parseAgentproxyPool(env.AGENTPROXY_POOL),
     dispatchSecret,
     dispatchStrategy: parseDispatchStrategy(env.DISPATCH_STRATEGY),
+    logLevel: parseLogLevel(env.LOG_LEVEL),
     relayConnectTimeoutMs: parsePositiveInteger(env.RELAY_CONNECT_TIMEOUT_MS, 10_000),
     relayResponseTimeoutMs: parsePositiveInteger(env.RELAY_RESPONSE_TIMEOUT_MS, 30_000),
   }

@@ -74,8 +74,11 @@ POST /ssl/api.openai.com/v1/responses
 
 ### `hash`（哈希）
 
-- 以 `target site + Authorization` 计算稳定索引
-- 缺失 `Authorization` 时以空字符串参与哈希
+- 优先从 `Cookie` 中提取 `session`，若不存在则取首个名称包含 `session` 的 Cookie 字段
+- 若没有可用 Cookie，再按顺序使用 `Authorization`、其他常见认证头和名称包含 `auth` 的头部
+- 命中粘性标识时，以 `target site + sticky identifier` 计算稳定索引
+- 当请求既没有 session Cookie，也没有可用认证头时，按 `target site` 维度缓存一个后端索引 1 小时
+- 同一 `target site` 的无身份请求在缓存期内保持固定，缓存过期后按 `0 -> 1 -> ... -> N-1 -> 0` 轮转
 - 池长度或顺序变化会导致映射重排（非一致性哈希）
 
 ## 配置项

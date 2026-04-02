@@ -4,7 +4,8 @@ import { createRelayHeaders, cloneResponseHeaders } from './headers'
 import { resolveIngressRequest } from './routing'
 import {
   createDispatchState,
-  selectAgentproxyIndex,
+  selectAgentproxy,
+  type DispatchSelection,
   type DispatchState,
 } from './strategy'
 
@@ -13,6 +14,43 @@ export type { DispatchEnv } from './config'
 export type FetchImplementation = (request: Request) => Promise<Response>
 
 const defaultDispatchState = createDispatchState()
+
+function serializeHeaders(headers: Headers): Record<string, string> {
+  const serialized: Record<string, string> = {}
+
+  for (const [name, value] of headers.entries()) {
+    serialized[name] = value
+  }
+
+  return serialized
+}
+
+function serializeSelection(selection: DispatchSelection): Record<string, number | string> {
+  const baseSelection = {
+    strategy: selection.strategy,
+    poolLength: selection.poolLength,
+    selectedIndex: selection.proxyIndex,
+  }
+
+  if (selection.strategy === 'hash') {
+    if (selection.selectionMode === 'site-fallback') {
+      return {
+        ...baseSelection,
+        stickySource: selection.stickySource,
+        expiresAt: selection.expiresAt,
+      }
+    }
+
+    return {
+      ...baseSelection,
+      stickySource: selection.stickySource,
+      hashInput: selection.hashInput,
+      hashValue: selection.hashValue,
+    }
+  }
+
+  return baseSelection
+}
 
 function buildRelayUrl(
   proxyBaseUrl: URL,
@@ -136,18 +174,34 @@ export async function handleDispatchRequest(
     const requestUrl = new URL(request.url)
     const config = getRuntimeConfig(env)
     const ingress = resolveIngressRequest(requestUrl)
-    const proxyIndex = selectAgentproxyIndex(
+    const selection = selectAgentproxy(
       config.dispatchStrategy,
       config.agentproxyPool.length,
       ingress.authority,
-      request.headers.get('authorization') ?? undefined,
+      request.headers,
       state,
     )
+    const proxyIndex = selection.proxyIndex
     const proxyBaseUrl = config.agentproxyPool[proxyIndex]
 
     if (!proxyBaseUrl) {
       throw new DispatchError(500, 'INVALID_CONFIGURATION', '选中的 agentproxy 节点不存在')
     }
+
+    if (config.logLevel === 'debug') {
+      console.debug('[agent-dispatch] debug request', {
+        headers: serializeHeaders(request.headers),
+        selection: serializeSelection(selection),
+        targetAuthority: ingress.authority,
+      })
+    }
+
+    console.info('[agent-dispatch] selected backend', {
+      strategy: config.dispatchStrategy,
+      proxyIndex,
+      backend: proxyBaseUrl.toString(),
+      targetAuthority: ingress.authority,
+    })
 
     const abortController = new AbortController()
     const relayUrl = buildRelayUrl(

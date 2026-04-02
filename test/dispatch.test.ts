@@ -18,6 +18,12 @@ function createEnv(overrides: Partial<DispatchEnv> = {}): DispatchEnv {
   }
 }
 
+function createDebugEnv(
+  overrides: Partial<DispatchEnv> = {},
+): DispatchEnv & { LOG_LEVEL: string } {
+  return Object.assign(createEnv(overrides), { LOG_LEVEL: 'debug' })
+}
+
 function readSetCookies(headers: Headers): string[] {
   const getSetCookie = (
     headers as Headers & { getSetCookie?: () => string[] }
@@ -82,6 +88,142 @@ describe('handleDispatchRequest', () => {
 
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('http-ok')
+  })
+
+  it('logs the selected dispatch strategy and backend at info level', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses'),
+        createEnv({ DISPATCH_STRATEGY: 'hash' }),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(200)
+      expect(infoSpy).toHaveBeenCalledWith(
+        '[agent-dispatch] selected backend',
+        expect.objectContaining({
+          strategy: 'hash',
+          backend: 'https://proxy-a.internal/',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('does not log request headers or hash details below debug level', async () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses', {
+          headers: {
+            Authorization: 'Bearer abc',
+            'User-Agent': 'dispatch-test',
+            'X-Trace-Id': 'trace-1',
+          },
+        }),
+        createEnv({
+          AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+          DISPATCH_STRATEGY: 'hash',
+        }),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(200)
+      expect(debugSpy).not.toHaveBeenCalled()
+    } finally {
+      debugSpy.mockRestore()
+    }
+  })
+
+  it('logs plaintext request headers and hash routing details at debug level', async () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses?stream=true', {
+          headers: {
+            Authorization: 'Bearer abc',
+            'User-Agent': 'dispatch-test',
+            'X-Trace-Id': 'trace-1',
+          },
+        }),
+        createDebugEnv({
+          AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+          DISPATCH_STRATEGY: 'hash',
+        }),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(200)
+      expect(debugSpy).toHaveBeenCalledWith(
+        '[agent-dispatch] debug request',
+        expect.objectContaining({
+          headers: expect.objectContaining({
+            authorization: 'Bearer abc',
+            'user-agent': 'dispatch-test',
+            'x-trace-id': 'trace-1',
+          }),
+          selection: expect.objectContaining({
+            strategy: 'hash',
+            stickySource: 'auth-authorization',
+            hashInput: 'api.openai.com\nBearer abc',
+            hashValue: expect.any(Number),
+            selectedIndex: expect.any(Number),
+            poolLength: 2,
+          }),
+        }),
+      )
+
+      const debugPayload = debugSpy.mock.calls.at(0)?.[1]
+
+      expect(debugPayload).toBeDefined()
+      expect(debugPayload?.headers).not.toBeInstanceOf(Headers)
+    } finally {
+      debugSpy.mockRestore()
+    }
+  })
+
+  it('prefers the session cookie over authorization when building the sticky hash input', async () => {
+    const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses?stream=true', {
+          headers: {
+            Authorization: 'Bearer abc',
+            Cookie: 'theme=dark; session=session-123',
+            'User-Agent': 'dispatch-test',
+          },
+        }),
+        createDebugEnv({
+          AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+          DISPATCH_STRATEGY: 'hash',
+        }),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(200)
+      expect(debugSpy).toHaveBeenCalledWith(
+        '[agent-dispatch] debug request',
+        expect.objectContaining({
+          selection: expect.objectContaining({
+            strategy: 'hash',
+            stickySource: 'cookie-session',
+            hashInput: 'api.openai.com\nsession-123',
+          }),
+        }),
+      )
+    } finally {
+      debugSpy.mockRestore()
+    }
   })
 
   it.each(['/', '/ssl'])(
