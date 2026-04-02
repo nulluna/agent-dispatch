@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.wrangler/
+.wrangler-dist/
+.spec-workflow/
+coverage/
+
+# Environment & secrets
+.env
+.env.*
+.dev.vars
+
+# Logs
+*.log
+
+# OS
+.DS_Store
