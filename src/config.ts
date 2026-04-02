@@ -7,6 +7,8 @@ export interface DispatchEnv {
   LOG_LEVEL?: string
   RELAY_CONNECT_TIMEOUT_MS?: string
   RELAY_RESPONSE_TIMEOUT_MS?: string
+  DISPATCH_INGRESS_KEY?: string
+  DISPATCH_INGRESS_HEADER?: string
 }
 
 export type DispatchStrategy = 'poll' | 'hash'
@@ -19,6 +21,8 @@ export interface RuntimeConfig {
   logLevel: LogLevel
   relayConnectTimeoutMs: number
   relayResponseTimeoutMs: number
+  ingressKey: string
+  ingressHeader: string
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
@@ -96,5 +100,7 @@ export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
     logLevel: parseLogLevel(env.LOG_LEVEL),
     relayConnectTimeoutMs: parsePositiveInteger(env.RELAY_CONNECT_TIMEOUT_MS, 10_000),
     relayResponseTimeoutMs: parsePositiveInteger(env.RELAY_RESPONSE_TIMEOUT_MS, 30_000),
+    ingressKey: env.DISPATCH_INGRESS_KEY?.trim() ?? '',
+    ingressHeader: env.DISPATCH_INGRESS_HEADER?.trim().toLowerCase() || 'x-dispatch-token',
   }
 }

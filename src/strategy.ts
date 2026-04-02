@@ -25,7 +25,7 @@ export interface StickyHashDispatchSelection {
   proxyIndex: number
   selectedIndex: number
   stickySource: string
-  hashInput: string
+  accountHash: string
   hashValue: number
 }
 
@@ -291,7 +291,7 @@ export function selectAgentproxy(
     proxyIndex: selectedIndex,
     selectedIndex,
     stickySource: stickyIdentifier.source,
-    hashInput,
+    accountHash: hashString(stickyIdentifier.hashValue).toString(16).padStart(8, '0'),
     hashValue,
   }
 }

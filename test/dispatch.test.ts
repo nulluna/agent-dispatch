@@ -141,7 +141,7 @@ describe('handleDispatchRequest', () => {
     }
   })
 
-  it('logs plaintext request headers and hash routing details at debug level', async () => {
+  it('logs redacted request headers and hash routing details at debug level', async () => {
     const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
     const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
 
@@ -166,14 +166,14 @@ describe('handleDispatchRequest', () => {
         '[agent-dispatch] debug request',
         expect.objectContaining({
           headers: expect.objectContaining({
-            authorization: 'Bearer abc',
+            authorization: 'Bearer a***',
             'user-agent': 'dispatch-test',
             'x-trace-id': 'trace-1',
           }),
           selection: expect.objectContaining({
             strategy: 'hash',
             stickySource: 'auth-authorization',
-            hashInput: 'api.openai.com\nBearer abc',
+            accountHash: expect.stringMatching(/^[0-9a-f]{8}$/),
             hashValue: expect.any(Number),
             selectedIndex: expect.any(Number),
             poolLength: 2,
@@ -217,7 +217,7 @@ describe('handleDispatchRequest', () => {
           selection: expect.objectContaining({
             strategy: 'hash',
             stickySource: 'cookie-session',
-            hashInput: 'api.openai.com\nsession-123',
+            accountHash: expect.stringMatching(/^[0-9a-f]{8}$/),
           }),
         }),
       )
@@ -399,6 +399,92 @@ describe('handleDispatchRequest', () => {
 
     expect(response.status).toBe(200)
     await expect(response.text()).rejects.toThrow('内部 relay 响应超时')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('skips ingress auth when DISPATCH_INGRESS_KEY is not configured', async () => {
+    const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects requests without an ingress token when ingress auth is enabled', async () => {
+    const fetchSpy = vi.fn()
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv({ DISPATCH_INGRESS_KEY: 'correct-key' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(401)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'INGRESS_UNAUTHORIZED' },
+    })
+  })
+
+  it('rejects requests with a wrong ingress token when ingress auth is enabled', async () => {
+    const fetchSpy = vi.fn()
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses', {
+        headers: { 'x-dispatch-token': 'wrong-key' },
+      }),
+      createEnv({ DISPATCH_INGRESS_KEY: 'correct-key' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(401)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    await expect(response.json()).resolves.toMatchObject({
+      error: { code: 'INGRESS_UNAUTHORIZED' },
+    })
+  })
+
+  it('allows requests with the correct ingress token', async () => {
+    const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses', {
+        headers: {
+          'x-dispatch-token': 'correct-key',
+          Authorization: 'Bearer abc',
+        },
+      }),
+      createEnv({ DISPATCH_INGRESS_KEY: 'correct-key' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses a custom ingress header name when configured', async () => {
+    const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses', {
+        headers: {
+          'x-my-project-auth': 'correct-key',
+          Authorization: 'Bearer abc',
+        },
+      }),
+      createEnv({
+        DISPATCH_INGRESS_KEY: 'correct-key',
+        DISPATCH_INGRESS_HEADER: 'X-My-Project-Auth',
+      }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 })

@@ -13,13 +13,48 @@ export type { DispatchEnv } from './config'
 
 export type FetchImplementation = (request: Request) => Promise<Response>
 
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) {
+    return false
+  }
+
+  let mismatch = 0
+
+  for (let i = 0; i < a.length; i++) {
+    mismatch |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+
+  return mismatch === 0
+}
+
 const defaultDispatchState = createDispatchState()
+
+const SENSITIVE_HEADER_NAMES = new Set([
+  'authorization',
+  'proxy-authorization',
+  'cookie',
+  'set-cookie',
+])
+
+function isSensitiveHeader(name: string): boolean {
+  return SENSITIVE_HEADER_NAMES.has(name) || name.includes('token') || name.includes('secret')
+}
+
+function redactHeaderValue(value: string): string {
+  if (value.length <= 8) {
+    return '***'
+  }
+
+  return `${value.slice(0, 8)}***`
+}
 
 function serializeHeaders(headers: Headers): Record<string, string> {
   const serialized: Record<string, string> = {}
 
   for (const [name, value] of headers.entries()) {
-    serialized[name] = value
+    serialized[name] = isSensitiveHeader(name.toLowerCase())
+      ? redactHeaderValue(value)
+      : value
   }
 
   return serialized
@@ -44,7 +79,7 @@ function serializeSelection(selection: DispatchSelection): Record<string, number
     return {
       ...baseSelection,
       stickySource: selection.stickySource,
-      hashInput: selection.hashInput,
+      accountHash: selection.accountHash,
       hashValue: selection.hashValue,
     }
   }
@@ -173,6 +208,15 @@ export async function handleDispatchRequest(
   try {
     const requestUrl = new URL(request.url)
     const config = getRuntimeConfig(env)
+
+    if (config.ingressKey) {
+      const clientToken = request.headers.get(config.ingressHeader)
+
+      if (!clientToken || !timingSafeEqual(clientToken, config.ingressKey)) {
+        throw new DispatchError(401, 'INGRESS_UNAUTHORIZED', '入口认证失败')
+      }
+    }
+
     const ingress = resolveIngressRequest(requestUrl)
     const selection = selectAgentproxy(
       config.dispatchStrategy,
