@@ -1,8 +1,8 @@
-# agentdispatch
+# agent-dispatch
 
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](./LICENSE)
 
-本地 HTTP 入口网关，将应用请求按可配置策略分发到 [agentproxy](https://github.com/nulluna/agent-proxy) 池中的某个节点，并通过内部 HTTPS relay 透明转发到目标上游。
+本地 HTTP 入口网关，将应用请求按可配置策略分发到 [agent-proxy](https://github.com/nulluna/agent-proxy) 池中的某个节点，并通过内部 HTTPS relay 透明转发到目标上游。
 
 ## 网络拓扑
 
@@ -10,13 +10,13 @@
 graph LR
     subgraph 本地网络
         App[应用程序]
-        AD[agentdispatch]
+        AD[agent-dispatch]
     end
 
     subgraph 代理池 — 公网 / 边缘节点
-        AP1[agentproxy-1]
-        AP2[agentproxy-2]
-        AP3[agentproxy-N]
+        AP1[agent-proxy-1]
+        AP2[agent-proxy-2]
+        AP3[agent-proxy-N]
     end
 
     Upstream[目标上游]
@@ -41,9 +41,9 @@ graph LR
 
 | 段落 | 协议 | 说明 |
 |------|------|------|
-| 应用 → agentdispatch | HTTP | 本地回环，无需加密 |
-| agentdispatch → agentproxy | HTTPS | 内部 relay，携带 `DISPATCH_SECRET` |
-| agentproxy → 目标上游 | HTTP / HTTPS | 由请求路径前缀决定（`proxy/` = HTTP，`proxyssl/` = HTTPS） |
+| 应用 → agent-dispatch | HTTP | 本地回环，无需加密 |
+| agent-dispatch → agent-proxy | HTTPS | 内部 relay，携带 `DISPATCH_SECRET` |
+| agent-proxy → 目标上游 | HTTP / HTTPS | 由请求路径前缀决定（`proxy/` = HTTP，`proxyssl/` = HTTPS） |
 
 ## 路由语义
 
@@ -52,16 +52,16 @@ graph LR
 /ssl/<site>/<path>?query    →  https://<site>/<path>?query
 ```
 
-agentdispatch 接收到请求后，根据分发策略选中一个 agentproxy 节点，将请求改写为内部 relay 路径：
+agent-dispatch 接收到请求后，根据分发策略选中一个 agent-proxy 节点，将请求改写为内部 relay 路径：
 
 ```
 # HTTP 上游
 GET /example.com/search?q=test
-  → https://<agentproxy>/relay/<DISPATCH_SECRET>/proxy/example.com/search?q=test
+  → https://<agent-proxy>/relay/<DISPATCH_SECRET>/proxy/example.com/search?q=test
 
 # HTTPS 上游
 POST /ssl/api.openai.com/v1/responses
-  → https://<agentproxy>/relay/<DISPATCH_SECRET>/proxyssl/api.openai.com/v1/responses
+  → https://<agent-proxy>/relay/<DISPATCH_SECRET>/proxyssl/api.openai.com/v1/responses
 ```
 
 ## 分发策略
@@ -69,7 +69,7 @@ POST /ssl/api.openai.com/v1/responses
 ### `poll`（轮询）
 
 - 按 `AGENTPROXY_POOL` 配置顺序依次选择节点
-- 游标仅保存在当前 agentdispatch 实例内存中
+- 游标仅保存在当前 agent-dispatch 实例内存中
 - 轮转至池尾后回绕到第一个节点
 
 ### `hash`（哈希）
@@ -82,15 +82,15 @@ POST /ssl/api.openai.com/v1/responses
 
 | 环境变量 | 必填 | 说明 |
 |---------|------|------|
-| `AGENTPROXY_POOL` | 是 | 逗号分隔的 agentproxy 节点列表，例如 `https://a.internal,https://b.internal` |
-| `DISPATCH_SECRET` | 是 | 与所有 agentproxy 节点共享的 relay secret |
+| `AGENTPROXY_POOL` | 是 | 逗号分隔的 agent-proxy 节点列表，例如 `https://a.internal,https://b.internal` |
+| `DISPATCH_SECRET` | 是 | 与所有 agent-proxy 节点共享的 relay secret |
 | `DISPATCH_STRATEGY` | 否 | `poll`（默认）或 `hash` |
 | `RELAY_CONNECT_TIMEOUT_MS` | 否 | 内部 relay 连接超时（毫秒） |
 | `RELAY_RESPONSE_TIMEOUT_MS` | 否 | 内部 relay 响应流超时（毫秒） |
 
 ## 透明转发边界
 
-agentdispatch 会尽量保留以下内容：
+agent-dispatch 会尽量保留以下内容：
 
 **请求侧**
 - 原始 HTTP method、path、query string
@@ -127,10 +127,10 @@ npm run build        # Wrangler dry-run 构建
 
 ## 迁移指南
 
-1. 在所有 agentproxy 节点配置相同的 `DISPATCH_SECRET`，确认 `/relay/<secret>/proxyssl/...` 可用
-2. 部署 agentdispatch，配置 `AGENTPROXY_POOL`、`DISPATCH_STRATEGY` 和超时参数
-3. 将应用入口从"直连 agentproxy"切换到"访问本地 agentdispatch 的 `/<site>/...` 或 `/ssl/<site>/...`"
-4. 切换完成后，直接访问 agentproxy 的旧 `/proxy`、`/proxyssl` 入口将持续返回 `404`
+1. 在所有 agent-proxy 节点配置相同的 `DISPATCH_SECRET`，确认 `/relay/<secret>/proxyssl/...` 可用
+2. 部署 agent-dispatch，配置 `AGENTPROXY_POOL`、`DISPATCH_STRATEGY` 和超时参数
+3. 将应用入口从"直连 agent-proxy"切换到"访问本地 agent-dispatch 的 `/<site>/...` 或 `/ssl/<site>/...`"
+4. 切换完成后，直接访问 agent-proxy 的旧 `/proxy`、`/proxyssl` 入口将持续返回 `404`
 
 ## 使用说明与免责声明
 
