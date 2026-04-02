@@ -225,6 +225,38 @@ export async function handleDispatchRequest(
       request.headers,
       state,
     )
+
+    // 负向缓存：构建缓存 key
+    const negativeCache = state.negativeCache
+    let cacheKey: string | null = null
+    let accountBound = false
+
+    if (selection.strategy === 'hash') {
+      const accountId = selection.selectionMode === 'sticky-hash'
+        ? selection.accountHash
+        : `__site:${ingress.authority}`
+
+      accountBound = selection.selectionMode === 'sticky-hash'
+      cacheKey = negativeCache.buildCacheKey(
+        accountId,
+        request.method,
+        ingress.upstreamUrl.pathname,
+        ingress.upstreamUrl.search,
+      )
+
+      const cached = negativeCache.lookup(cacheKey)
+
+      if (cached) {
+        console.info('[agent-dispatch] negative cache hit', {
+          cacheKey,
+          status: cached.status,
+          expiresAt: cached.expiresAt,
+        })
+
+        return negativeCache.createCachedResponse(cached)
+      }
+    }
+
     const proxyIndex = selection.proxyIndex
     const proxyBaseUrl = config.agentproxyPool[proxyIndex]
 
@@ -261,6 +293,57 @@ export async function handleDispatchRequest(
       config.relayConnectTimeoutMs,
       abortController,
     )
+
+    // 负向缓存：记录上游响应
+    if (cacheKey) {
+      if (negativeCache.isCacheableStatus(relayResponse.status)) {
+        // 可缓存状态码：tee 流，一份缓存一份返回客户端
+        const responseBody = relayResponse.body
+        let cacheBody: ArrayBuffer
+        let clientBody: ReadableStream<Uint8Array> | null
+
+        if (responseBody) {
+          const [clientStream, cacheStream] = responseBody.tee()
+          cacheBody = await new Response(cacheStream).arrayBuffer()
+          clientBody = clientStream
+        } else {
+          cacheBody = new ArrayBuffer(0)
+          clientBody = null
+        }
+
+        negativeCache.recordResponse(
+          cacheKey,
+          relayResponse.status,
+          relayResponse.headers,
+          cacheBody,
+          accountBound,
+        )
+
+        console.info('[agent-dispatch] negative cache recorded', {
+          cacheKey,
+          status: relayResponse.status,
+          accountBound,
+        })
+
+        // body 已被 cacheStream 完整消费，clientStream 数据已就绪，无需超时保护
+        return new Response(clientBody, {
+          status: relayResponse.status,
+          statusText: relayResponse.statusText,
+          headers: cloneResponseHeaders(relayResponse),
+        })
+      }
+
+      // 非可缓存状态码：仅当存在缓存条目时才清除（探测成功场景）
+      if (negativeCache.entries.has(cacheKey)) {
+        negativeCache.recordResponse(
+          cacheKey,
+          relayResponse.status,
+          relayResponse.headers,
+          new ArrayBuffer(0),
+          accountBound,
+        )
+      }
+    }
 
     return createClientResponse(relayResponse, config.relayResponseTimeoutMs)
   } catch (error) {

@@ -487,4 +487,249 @@ describe('handleDispatchRequest', () => {
     expect(response.status).toBe(200)
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
+
+  // --- 负向缓存集成测试 ---
+
+  it('caches a 401 response under hash strategy and serves from cache on second request', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const state = createDispatchState()
+    let callCount = 0
+
+    const fetchSpy = vi.fn(async () => {
+      callCount++
+      return new Response('unauthorized', { status: 401 })
+    })
+
+    const env = createEnv({
+      DISPATCH_STRATEGY: 'hash',
+      AGENTPROXY_POOL: 'https://proxy-a.internal',
+    })
+
+    const makeRequest = () =>
+      createRequest('/ssl/api.openai.com/v1/responses?model=gpt-4', {
+        headers: { Authorization: 'Bearer test-key' },
+      })
+
+    try {
+      // 第一次请求：转发到上游，收到 401
+      const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response1.status).toBe(401)
+      expect(await response1.text()).toBe('unauthorized')
+      expect(callCount).toBe(1)
+
+      // 第二次请求：命中缓存，不转发
+      const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response2.status).toBe(401)
+      expect(await response2.text()).toBe('unauthorized')
+      expect(callCount).toBe(1) // fetchSpy 未被再次调用
+
+      expect(infoSpy).toHaveBeenCalledWith(
+        '[agent-dispatch] negative cache hit',
+        expect.objectContaining({ status: 401 }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('caches a 404 response under hash site-fallback with 30s TTL', async () => {
+    vi.useFakeTimers()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+
+    try {
+      const state = createDispatchState()
+      let callCount = 0
+
+      const fetchSpy = vi.fn(async () => {
+        callCount++
+        return new Response('not found', { status: 404 })
+      })
+
+      const env = createEnv({
+        DISPATCH_STRATEGY: 'hash',
+        AGENTPROXY_POOL: 'https://proxy-a.internal',
+      })
+
+      // 无 auth header → site-fallback 模式
+      const makeRequest = () => createRequest('/ssl/api.example.com/v1/resource')
+
+      // 第一次请求
+      const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response1.status).toBe(404)
+      expect(callCount).toBe(1)
+
+      // 10s 后：仍在 30s TTL 内，走缓存
+      vi.advanceTimersByTime(10_000)
+      const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response2.status).toBe(404)
+      expect(callCount).toBe(1)
+
+      // 31s 后：TTL 过期，放行探测
+      vi.advanceTimersByTime(21_000)
+      const response3 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response3.status).toBe(404)
+      expect(callCount).toBe(2) // 探测请求被转发
+    } finally {
+      infoSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('caches 429 response and respects Retry-After header', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const state = createDispatchState()
+    let callCount = 0
+
+    const fetchSpy = vi.fn(async () => {
+      callCount++
+      return new Response('rate limited', {
+        status: 429,
+        headers: { 'Retry-After': '60' },
+      })
+    })
+
+    const env = createEnv({
+      DISPATCH_STRATEGY: 'hash',
+      AGENTPROXY_POOL: 'https://proxy-a.internal',
+    })
+
+    const makeRequest = () =>
+      createRequest('/ssl/api.openai.com/v1/responses', {
+        headers: { Authorization: 'Bearer test-key' },
+      })
+
+    try {
+      const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response1.status).toBe(429)
+      expect(callCount).toBe(1)
+
+      // 缓存命中
+      const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response2.status).toBe(429)
+      expect(await response2.text()).toBe('rate limited')
+      expect(callCount).toBe(1)
+
+      // 验证 Retry-After 头也被缓存
+      expect(response2.headers.get('retry-after')).toBe('60')
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('cached response matches original upstream status, headers, and body', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const state = createDispatchState()
+
+    const fetchSpy = vi.fn(async () => {
+      return new Response('{"error":"forbidden"}', {
+        status: 403,
+        headers: {
+          'content-type': 'application/json',
+          'x-request-id': 'req-abc-123',
+        },
+      })
+    })
+
+    const env = createEnv({
+      DISPATCH_STRATEGY: 'hash',
+      AGENTPROXY_POOL: 'https://proxy-a.internal',
+    })
+
+    const makeRequest = () =>
+      createRequest('/ssl/api.openai.com/v1/chat', {
+        headers: { Authorization: 'Bearer test-key' },
+      })
+
+    try {
+      await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+
+      // 第二次请求走缓存
+      const cached = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(cached.status).toBe(403)
+      expect(cached.headers.get('content-type')).toBe('application/json')
+      expect(cached.headers.get('x-request-id')).toBe('req-abc-123')
+      expect(await cached.text()).toBe('{"error":"forbidden"}')
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('does not use negative cache under poll strategy', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const state = createDispatchState()
+    let callCount = 0
+
+    const fetchSpy = vi.fn(async () => {
+      callCount++
+      return new Response('not found', { status: 404 })
+    })
+
+    const env = createEnv({
+      DISPATCH_STRATEGY: 'poll',
+      AGENTPROXY_POOL: 'https://proxy-a.internal',
+    })
+
+    const makeRequest = () =>
+      createRequest('/ssl/api.openai.com/v1/responses', {
+        headers: { Authorization: 'Bearer test-key' },
+      })
+
+    try {
+      await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+
+      // poll 策略不缓存，两次都转发
+      expect(callCount).toBe(2)
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('clears negative cache when probe returns a successful response', async () => {
+    vi.useFakeTimers()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+
+    try {
+      const state = createDispatchState()
+      let callCount = 0
+
+      const fetchSpy = vi.fn(async () => {
+        callCount++
+        // 第一次返回 401，第二次（探测）返回 200
+        if (callCount <= 1) {
+          return new Response('unauthorized', { status: 401 })
+        }
+        return new Response('ok', { status: 200 })
+      })
+
+      const env = createEnv({
+        DISPATCH_STRATEGY: 'hash',
+        AGENTPROXY_POOL: 'https://proxy-a.internal',
+      })
+
+      const makeRequest = () =>
+        createRequest('/ssl/api.openai.com/v1/responses', {
+          headers: { Authorization: 'Bearer test-key' },
+        })
+
+      // 第一次请求，缓存 401
+      await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(callCount).toBe(1)
+
+      // TTL 过期 → 探测放行
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1)
+      const probeResponse = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(probeResponse.status).toBe(200)
+      expect(await probeResponse.text()).toBe('ok')
+      expect(callCount).toBe(2)
+
+      // 缓存已清除，后续请求直接转发
+      const response3 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response3.status).toBe(200)
+      expect(callCount).toBe(3)
+    } finally {
+      infoSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
 })

@@ -1,10 +1,12 @@
 import type { DispatchStrategy } from './config'
+import { NegativeResponseCache } from './negative-cache'
 
 const SITE_FALLBACK_TTL_MS = 60 * 60 * 1000
 
 export interface DispatchState {
   nextPollIndex: number
   siteFallbackSelections: Map<string, SiteFallbackSelectionState>
+  negativeCache: NegativeResponseCache
 }
 
 interface SiteFallbackSelectionState {
@@ -48,6 +50,7 @@ export function createDispatchState(): DispatchState {
   return {
     nextPollIndex: 0,
     siteFallbackSelections: new Map(),
+    negativeCache: new NegativeResponseCache(),
   }
 }
 
