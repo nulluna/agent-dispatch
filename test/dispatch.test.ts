@@ -401,6 +401,70 @@ describe('handleDispatchRequest', () => {
     expect(state.relayStats.retrySuccesses).toBe(1)
   })
 
+  it('applies DNS resolution when DNS_RESOLVE is configured', async () => {
+    const state = createDispatchState()
+    let capturedUrl = ''
+
+    const fetchSpy = vi.fn(async (request: Request) => {
+      capturedUrl = request.url
+      return new Response('ok', { status: 200 })
+    })
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/example.com/v1/chat'),
+      createEnv({ DNS_RESOLVE: 'proxy-a.internal=1.2.3.4' }),
+      fetchSpy,
+      state,
+    )
+
+    expect(response.status).toBe(200)
+    expect(capturedUrl).toContain('1.2.3.4')
+
+    const relayRequest = fetchSpy.mock.calls[0][0] as Request
+    expect(relayRequest.headers.get('host')).toBe('proxy-a.internal')
+  })
+
+  it('skips DNS resolution when no mapping matches the relay host', async () => {
+    const state = createDispatchState()
+    let capturedUrl = ''
+
+    const fetchSpy = vi.fn(async (request: Request) => {
+      capturedUrl = request.url
+      return new Response('ok', { status: 200 })
+    })
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/example.com/v1/chat'),
+      createEnv({ DNS_RESOLVE: 'unrelated.host=1.2.3.4' }),
+      fetchSpy,
+      state,
+    )
+
+    expect(response.status).toBe(200)
+    expect(capturedUrl).toContain('proxy-a.internal')
+    expect(capturedUrl).not.toContain('1.2.3.4')
+  })
+
+  it('does not apply DNS resolution when DNS_RESOLVE is empty', async () => {
+    const state = createDispatchState()
+    let capturedUrl = ''
+
+    const fetchSpy = vi.fn(async (request: Request) => {
+      capturedUrl = request.url
+      return new Response('ok', { status: 200 })
+    })
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/example.com/v1/chat'),
+      createEnv(),
+      fetchSpy,
+      state,
+    )
+
+    expect(response.status).toBe(200)
+    expect(capturedUrl).toContain('proxy-a.internal')
+  })
+
   it('fails the client stream when the relay response body exceeds the configured timeout', async () => {
     const state = createDispatchState()
     const fetchSpy = vi.fn(

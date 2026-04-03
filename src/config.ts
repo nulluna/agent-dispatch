@@ -9,6 +9,7 @@ export interface DispatchEnv {
   RELAY_RESPONSE_TIMEOUT_MS?: string
   DISPATCH_INGRESS_KEY?: string
   DISPATCH_INGRESS_HEADER?: string
+  DNS_RESOLVE?: string
 }
 
 export type DispatchStrategy = 'poll' | 'hash'
@@ -23,6 +24,7 @@ export interface RuntimeConfig {
   relayResponseTimeoutMs: number
   ingressKey: string
   ingressHeader: string
+  dnsResolve: Map<string, string>
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
@@ -57,6 +59,36 @@ function parseLogLevel(value?: string): LogLevel {
   }
 
   throw new DispatchError(500, 'INVALID_CONFIGURATION', 'LOG_LEVEL 配置无效')
+}
+
+function parseDnsResolve(value?: string): Map<string, string> {
+  const result = new Map<string, string>()
+
+  if (!value || value.trim() === '') {
+    return result
+  }
+
+  for (const entry of value.split(',')) {
+    const trimmed = entry.trim()
+    if (!trimmed) continue
+
+    const separatorIndex = trimmed.indexOf('=')
+
+    if (separatorIndex <= 0) {
+      throw new DispatchError(500, 'INVALID_CONFIGURATION', `DNS_RESOLVE 条目格式无效: ${trimmed}`)
+    }
+
+    const hostname = trimmed.slice(0, separatorIndex).trim().toLowerCase()
+    const address = trimmed.slice(separatorIndex + 1).trim()
+
+    if (!hostname || !address) {
+      throw new DispatchError(500, 'INVALID_CONFIGURATION', `DNS_RESOLVE 条目不完整: ${trimmed}`)
+    }
+
+    result.set(hostname, address)
+  }
+
+  return result
 }
 
 function parseAgentproxyPool(value?: string): URL[] {
@@ -102,5 +134,6 @@ export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
     relayResponseTimeoutMs: parsePositiveInteger(env.RELAY_RESPONSE_TIMEOUT_MS, 30_000),
     ingressKey: env.DISPATCH_INGRESS_KEY?.trim() ?? '',
     ingressHeader: env.DISPATCH_INGRESS_HEADER?.trim().toLowerCase() || 'x-dispatch-token',
+    dnsResolve: parseDnsResolve(env.DNS_RESOLVE),
   }
 }

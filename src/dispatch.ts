@@ -185,6 +185,46 @@ function createClientResponse(response: Response, timeoutMs: number): Response {
 
 const RELAY_RETRY_DELAYS_MS = [0, 500, 1000]
 
+function createDnsResolveFetch(
+  fetchImpl: FetchImplementation,
+  dnsResolve: Map<string, string>,
+): FetchImplementation {
+  if (dnsResolve.size === 0) return fetchImpl
+
+  return async (request: Request) => {
+    const url = new URL(request.url)
+    const resolved = dnsResolve.get(url.hostname)
+
+    if (!resolved) return fetchImpl(request)
+
+    const originalHostname = url.hostname
+    const resolvedUrl = new URL(request.url)
+    resolvedUrl.hostname = resolved
+
+    const headers = new Headers(request.headers)
+    headers.set('host', originalHostname)
+
+    console.info('[agent-dispatch] dns resolve applied', {
+      original: originalHostname,
+      resolved,
+    })
+
+    const init: RequestInit & { duplex?: 'half' } = {
+      method: request.method,
+      headers,
+      redirect: request.redirect,
+      signal: request.signal,
+    }
+
+    if (request.body) {
+      init.body = request.body
+      init.duplex = 'half'
+    }
+
+    return fetchImpl(new Request(resolvedUrl, init))
+  }
+}
+
 async function fetchRelayResponse(
   createRequest: (signal: AbortSignal) => Request,
   fetchImplementation: FetchImplementation,
@@ -349,10 +389,11 @@ export async function handleDispatchRequest(
     const hasBody = request.body !== null && request.method !== 'GET' && request.method !== 'HEAD'
     const bufferedBody = hasBody ? await new Response(request.body).arrayBuffer() : null
     const createRelayRequest = createRelayRequestFactory(request, relayUrl, bufferedBody)
+    const resolvedFetch = createDnsResolveFetch(fetchImplementation, config.dnsResolve)
 
     const relayResponse = await fetchRelayResponse(
       createRelayRequest,
-      fetchImplementation,
+      resolvedFetch,
       config.relayConnectTimeoutMs,
       { backend: proxyBaseUrl.toString(), proxyIndex },
       state.relayStats,
