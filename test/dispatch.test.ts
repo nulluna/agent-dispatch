@@ -227,7 +227,7 @@ describe('handleDispatchRequest', () => {
     }
   })
 
-  it('prefers the session cookie over authorization when building the sticky hash input', async () => {
+  it('prefers new-api-user over lower-priority sticky headers when building the hash input', async () => {
     const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
     const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
 
@@ -235,7 +235,9 @@ describe('handleDispatchRequest', () => {
       const response = await handleDispatchRequest(
         createRequest('/ssl/api.openai.com/v1/responses?stream=true', {
           headers: {
+            'New-Api-User': 'user-123',
             Authorization: 'Bearer abc',
+            'X-Auth-Token': 'token-123',
             Cookie: 'theme=dark; session=session-123',
             'User-Agent': 'dispatch-test',
           },
@@ -253,13 +255,48 @@ describe('handleDispatchRequest', () => {
         expect.objectContaining({
           selection: expect.objectContaining({
             strategy: 'hash',
-            stickySource: 'cookie-session',
+            stickySource: 'auth-new-api-user',
             accountHash: expect.stringMatching(/^[0-9a-f]{8}$/),
           }),
         }),
       )
     } finally {
       debugSpy.mockRestore()
+    }
+  })
+
+  it('logs ignored auth-like headers at info level when hash routing falls back to site scope', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses', {
+          headers: {
+            'X-Access-Token': 'secret-token',
+            'Proxy-Authorization': 'internal-proxy-token',
+          },
+        }),
+        createEnv({
+          AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+          DISPATCH_STRATEGY: 'hash',
+        }),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(200)
+      expect(infoSpy).toHaveBeenCalledWith(
+        '[agent-dispatch] sticky auth-like headers ignored',
+        expect.objectContaining({
+          targetAuthority: 'api.openai.com',
+          headers: expect.objectContaining({
+            'x-access-token': 'secret-t***',
+            'proxy-authorization': 'internal***',
+          }),
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
     }
   })
 

@@ -124,18 +124,21 @@ function resolveStickyCookie(headers: Headers): { source: string; value: string 
   return fuzzyMatch
 }
 
-const preferredAuthHeaderNames = [
+const preferredStickyHeaderNames = [
+  'new-api-user',
   'authorization',
-  'x-authorization',
-  'proxy-authorization',
   'x-auth-token',
   'auth-token',
   'x-api-key',
   'api-key',
+  'access-token',
+  'x-authorization',
 ] as const
 
-function resolveStickyAuth(headers: Headers): { source: string; value: string } | undefined {
-  for (const headerName of preferredAuthHeaderNames) {
+const ignoredAuthLikeHeaderPattern = /(auth|token|key)/
+
+function resolveStickyHeader(headers: Headers): { source: string; value: string } | undefined {
+  for (const headerName of preferredStickyHeaderNames) {
     const value = headers.get(headerName)?.trim()
 
     if (value) {
@@ -146,33 +149,19 @@ function resolveStickyAuth(headers: Headers): { source: string; value: string } 
     }
   }
 
-  for (const [headerName, rawValue] of headers.entries()) {
-    const normalizedName = headerName.toLowerCase()
-
-    if (
-      preferredAuthHeaderNames.includes(
-        normalizedName as (typeof preferredAuthHeaderNames)[number],
-      )
-    ) {
-      continue
-    }
-
-    const value = rawValue.trim()
-
-    if (!value || !normalizedName.includes('auth')) {
-      continue
-    }
-
-    return {
-      source: `auth-${normalizedName}`,
-      value,
-    }
-  }
-
   return undefined
 }
 
-function resolveStickyIdentifier(headers: Headers): { source: string; hashValue: string } | undefined {
+export function resolveStickyIdentifier(headers: Headers): { source: string; hashValue: string } | undefined {
+  const headerMatch = resolveStickyHeader(headers)
+
+  if (headerMatch) {
+    return {
+      source: headerMatch.source,
+      hashValue: headerMatch.value,
+    }
+  }
+
   const cookieMatch = resolveStickyCookie(headers)
 
   if (cookieMatch) {
@@ -182,16 +171,37 @@ function resolveStickyIdentifier(headers: Headers): { source: string; hashValue:
     }
   }
 
-  const authMatch = resolveStickyAuth(headers)
+  return undefined
+}
 
-  if (authMatch) {
-    return {
-      source: authMatch.source,
-      hashValue: authMatch.value,
+export function collectIgnoredAuthLikeHeaders(headers: Headers): Record<string, string> {
+  const ignored: Record<string, string> = {}
+
+  for (const [headerName, rawValue] of headers.entries()) {
+    const normalizedName = headerName.toLowerCase()
+
+    if (
+      preferredStickyHeaderNames.includes(
+        normalizedName as (typeof preferredStickyHeaderNames)[number],
+      )
+    ) {
+      continue
     }
+
+    if (!ignoredAuthLikeHeaderPattern.test(normalizedName)) {
+      continue
+    }
+
+    const value = rawValue.trim()
+
+    if (!value) {
+      continue
+    }
+
+    ignored[normalizedName] = value
   }
 
-  return undefined
+  return ignored
 }
 
 function selectSiteFallback(

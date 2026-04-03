@@ -74,13 +74,14 @@ POST /ssl/api.openai.com/v1/responses
 
 ### `hash`（哈希）
 
-- 优先从 `Cookie` 中提取 `session`，若不存在则取首个名称包含 `session` 的 Cookie 字段
-- 若没有可用 Cookie，再按顺序使用 `Authorization`、其他常见认证头和名称包含 `auth` 的头部
+- 按固定优先级提取粘性标识：`New-Api-User` → `Authorization` → `X-Auth-Token` → `Auth-Token` → `X-Api-Key` → `Api-Key` → `Access-Token` → `X-Authorization` → `Cookie.session` → 名称包含 `session` 的 Cookie
+- `Proxy-Authorization` 不参与 `hash` 粘性标识计算，也不会继续转发给上游
 - 命中粘性标识时，以 `target site + sticky identifier` 计算稳定索引
 - 当请求既没有 session Cookie，也没有可用认证头时，按 `target site` 维度缓存一个后端索引 1 小时
 - 同一 `target site` 的无身份请求在缓存期内保持固定，缓存过期后按 `0 -> 1 -> ... -> N-1 -> 0` 轮转
 - 池长度或顺序变化会导致映射重排（非一致性哈希）
 - 负向缓存默认关闭；仅在 `DISPATCH_NEGATIVE_CACHE_ENABLED=true` 时，才会缓存 `401/403/404/405/410/429`
+- 若请求落入 `site-fallback`，但头里存在未参与 sticky 的 auth-like 字段，`info` 日志会输出脱敏后的诊断信息，便于排查
 
 ## 配置项
 

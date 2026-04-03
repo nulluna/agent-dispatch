@@ -16,7 +16,7 @@ describe('selectAgentproxyIndex', () => {
     expect(selectAgentproxyIndex('poll', 3, 'example.com', createHeaders(), state)).toBe(0)
   })
 
-  it('keeps hash routing stable for the same site and session cookie', () => {
+  it('keeps hash routing stable for the same site and new-api-user header', () => {
     const state = createDispatchState()
 
     const first = selectAgentproxyIndex(
@@ -24,6 +24,7 @@ describe('selectAgentproxyIndex', () => {
       3,
       'api.openai.com',
       createHeaders({
+        'New-Api-User': 'user-123',
         Cookie: 'session=session-123; theme=dark',
         Authorization: 'Bearer ignored',
       }),
@@ -34,6 +35,7 @@ describe('selectAgentproxyIndex', () => {
       3,
       'api.openai.com',
       createHeaders({
+        'New-Api-User': 'user-123',
         Cookie: 'session=session-123; locale=zh-CN',
         Authorization: 'Bearer changed',
       }),
@@ -69,7 +71,7 @@ describe('selectAgentproxyIndex', () => {
     )
   })
 
-  it('uses authorization headers when no session cookie exists', () => {
+  it('prefers authorization over session cookies', () => {
     const state = createDispatchState()
 
     expect(
@@ -79,6 +81,7 @@ describe('selectAgentproxyIndex', () => {
         'api.openai.com',
         createHeaders({
           Authorization: 'Bearer abc',
+          Cookie: 'session=session-123',
         }),
         state,
       ),
@@ -89,13 +92,14 @@ describe('selectAgentproxyIndex', () => {
         'api.openai.com',
         createHeaders({
           Authorization: 'Bearer abc',
+          Cookie: 'session=session-456',
         }),
         state,
       ),
     )
   })
 
-  it('falls back to other auth headers when authorization is absent', () => {
+  it('uses access-token before x-authorization and cookies', () => {
     const state = createDispatchState()
 
     expect(
@@ -104,7 +108,9 @@ describe('selectAgentproxyIndex', () => {
         3,
         'api.openai.com',
         createHeaders({
-          'X-Auth-Token': 'token-123',
+          'Access-Token': 'access-123',
+          'X-Authorization': 'x-auth-ignored',
+          Cookie: 'session=session-ignored',
         }),
         state,
       ),
@@ -114,7 +120,37 @@ describe('selectAgentproxyIndex', () => {
         3,
         'api.openai.com',
         createHeaders({
-          'X-Auth-Token': 'token-123',
+          'Access-Token': 'access-123',
+          'X-Authorization': 'x-auth-changed',
+          Cookie: 'session=session-changed',
+        }),
+        state,
+      ),
+    )
+  })
+
+  it('uses x-authorization when higher-priority sticky headers are absent', () => {
+    const state = createDispatchState()
+
+    expect(
+      selectAgentproxyIndex(
+        'hash',
+        3,
+        'api.openai.com',
+        createHeaders({
+          'X-Authorization': 'x-auth-123',
+          Cookie: 'session=session-ignored',
+        }),
+        state,
+      ),
+    ).toBe(
+      selectAgentproxyIndex(
+        'hash',
+        3,
+        'api.openai.com',
+        createHeaders({
+          'X-Authorization': 'x-auth-123',
+          Cookie: 'session=session-changed',
         }),
         state,
       ),

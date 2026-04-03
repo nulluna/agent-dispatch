@@ -4,6 +4,7 @@ import { createRelayHeaders, cloneResponseHeaders } from './headers'
 import { detectLlmRequestInfo, type LlmRequestInfo } from './request-protocol'
 import { resolveIngressRequest } from './routing'
 import {
+  collectIgnoredAuthLikeHeaders,
   createDispatchState,
   selectAgentproxy,
   type DispatchSelection,
@@ -103,6 +104,16 @@ function serializeHeaders(headers: Headers): Record<string, string> {
   }
 
   return serialized
+}
+
+function redactHeaderRecord(headers: Record<string, string>): Record<string, string> {
+  const redacted: Record<string, string> = {}
+
+  for (const [name, value] of Object.entries(headers)) {
+    redacted[name] = redactHeaderValue(value)
+  }
+
+  return redacted
 }
 
 function serializeSelection(selection: DispatchSelection): Record<string, number | string> {
@@ -593,6 +604,18 @@ export async function handleDispatchRequest(
       request.headers,
       state,
     )
+
+    if (selection.strategy === 'hash' && selection.selectionMode === 'site-fallback') {
+      const ignoredAuthLikeHeaders = collectIgnoredAuthLikeHeaders(request.headers)
+
+      if (Object.keys(ignoredAuthLikeHeaders).length > 0) {
+        console.info('[agent-dispatch] sticky auth-like headers ignored', {
+          targetAuthority: ingress.authority,
+          headers: redactHeaderRecord(ignoredAuthLikeHeaders),
+        })
+      }
+    }
+
     const hasBody = request.body !== null && request.method !== 'GET' && request.method !== 'HEAD'
     const bufferedBody = hasBody ? await new Response(request.body).arrayBuffer() : null
     requestInfo = detectLlmRequestInfo(request, ingress.upstreamUrl, bufferedBody)
