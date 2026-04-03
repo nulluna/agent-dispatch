@@ -29,6 +29,49 @@ function timingSafeEqual(a: string, b: string): boolean {
 }
 
 const defaultDispatchState = createDispatchState()
+const RESPONSE_LOG_BODY_LIMIT = 512
+const HTTP_STATUS_TEXTS = new Map<number, string>([
+  [300, 'Multiple Choices'],
+  [301, 'Moved Permanently'],
+  [302, 'Found'],
+  [303, 'See Other'],
+  [304, 'Not Modified'],
+  [307, 'Temporary Redirect'],
+  [308, 'Permanent Redirect'],
+  [400, 'Bad Request'],
+  [401, 'Unauthorized'],
+  [402, 'Payment Required'],
+  [403, 'Forbidden'],
+  [404, 'Not Found'],
+  [405, 'Method Not Allowed'],
+  [406, 'Not Acceptable'],
+  [407, 'Proxy Authentication Required'],
+  [408, 'Request Timeout'],
+  [409, 'Conflict'],
+  [410, 'Gone'],
+  [411, 'Length Required'],
+  [412, 'Precondition Failed'],
+  [413, 'Payload Too Large'],
+  [414, 'URI Too Long'],
+  [415, 'Unsupported Media Type'],
+  [416, 'Range Not Satisfiable'],
+  [417, 'Expectation Failed'],
+  [418, "I'm a Teapot"],
+  [421, 'Misdirected Request'],
+  [422, 'Unprocessable Content'],
+  [423, 'Locked'],
+  [424, 'Failed Dependency'],
+  [425, 'Too Early'],
+  [426, 'Upgrade Required'],
+  [428, 'Precondition Required'],
+  [429, 'Too Many Requests'],
+  [431, 'Request Header Fields Too Large'],
+  [451, 'Unavailable For Legal Reasons'],
+  [500, 'Internal Server Error'],
+  [502, 'Bad Gateway'],
+  [503, 'Service Unavailable'],
+  [504, 'Gateway Timeout'],
+])
 
 const SENSITIVE_HEADER_NAMES = new Set([
   'authorization',
@@ -246,6 +289,137 @@ function createClientResponse(
   })
 }
 
+function formatRequestPath(requestUrl: URL): string {
+  return `${requestUrl.pathname}${requestUrl.search}`
+}
+
+function getResponseStatusText(response: Response): string {
+  return response.statusText || HTTP_STATUS_TEXTS.get(response.status) || `HTTP ${response.status}`
+}
+
+function truncateLogText(value: string): string {
+  if (value.length <= RESPONSE_LOG_BODY_LIMIT) {
+    return value
+  }
+
+  return `${value.slice(0, RESPONSE_LOG_BODY_LIMIT)}...`
+}
+
+function readStringField(record: Record<string, unknown>, key: string): string | undefined {
+  const value = record[key]
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function extractErrorLogFields(payload: unknown): Record<string, string> {
+  if (!payload || typeof payload !== 'object') {
+    return {}
+  }
+
+  const record = payload as Record<string, unknown>
+  const nestedError = record.error
+
+  if (nestedError && typeof nestedError === 'object') {
+    const nestedRecord = nestedError as Record<string, unknown>
+    const error = readStringField(nestedRecord, 'code')
+      || readStringField(nestedRecord, 'error')
+      || readStringField(nestedRecord, 'type')
+    const message = readStringField(nestedRecord, 'message')
+      || readStringField(record, 'message')
+
+    return {
+      ...(error ? { error } : {}),
+      ...(message ? { message } : {}),
+    }
+  }
+
+  const error = readStringField(record, 'code')
+    || readStringField(record, 'error')
+  const message = readStringField(record, 'message')
+
+  return {
+    ...(error ? { error } : {}),
+    ...(message ? { message } : {}),
+  }
+}
+
+async function buildErrorLogFields(response: Response): Promise<Record<string, string>> {
+  if (response.body === null) {
+    return {}
+  }
+
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+
+  if (!contentType.includes('json') && !contentType.startsWith('text/')) {
+    return {}
+  }
+
+  const bodyText = truncateLogText(await response.clone().text()).trim()
+
+  if (!bodyText) {
+    return {}
+  }
+
+  if (contentType.includes('json')) {
+    try {
+      const parsed = JSON.parse(bodyText) as unknown
+      const extracted = extractErrorLogFields(parsed)
+
+      if (Object.keys(extracted).length > 0) {
+        return extracted
+      }
+    } catch {
+      // 解析失败时回退到纯文本摘要
+    }
+  }
+
+  return { message: bodyText }
+}
+
+function build3xxLogFields(response: Response): Record<string, string> {
+  const location = response.headers.get('location')
+  const refresh = response.headers.get('refresh')
+
+  return {
+    ...(location ? { location } : {}),
+    ...(refresh ? { refresh } : {}),
+  }
+}
+
+function formatResponseInfoLine(
+  request: Request,
+  requestUrl: URL,
+  response: Response,
+  startedAtMs: number,
+): string {
+  const durationMs = Math.max(0, Date.now() - startedAtMs)
+
+  return `[wrangler:info] ${request.method} ${formatRequestPath(requestUrl)} ${response.status} ${getResponseStatusText(response)} (${durationMs}ms)`
+}
+
+async function logFinalResponse(
+  request: Request,
+  requestUrl: URL,
+  response: Response,
+  startedAtMs: number,
+): Promise<Response> {
+  if (response.status >= 300 && response.status < 400) {
+    const details = build3xxLogFields(response)
+
+    if (Object.keys(details).length > 0) {
+      console.info(formatResponseInfoLine(request, requestUrl, response, startedAtMs), details)
+    }
+
+    return response
+  }
+
+  if (response.status >= 400 && response.status < 600) {
+    const details = await buildErrorLogFields(response)
+    console.info(formatResponseInfoLine(request, requestUrl, response, startedAtMs), details)
+  }
+
+  return response
+}
+
 const RELAY_RETRY_DELAYS_MS = [0, 500, 1000]
 
 function createDnsResolveFetch(
@@ -369,8 +543,10 @@ export async function handleDispatchRequest(
   fetchImplementation: FetchImplementation = fetch,
   state: DispatchState = defaultDispatchState,
 ): Promise<Response> {
+  const startedAtMs = Date.now()
+  const requestUrl = new URL(request.url)
+
   try {
-    const requestUrl = new URL(request.url)
     const config = getRuntimeConfig(env)
 
     if (config.ingressKey) {
@@ -417,7 +593,12 @@ export async function handleDispatchRequest(
           expiresAt: cached.expiresAt,
         })
 
-        return negativeCache.createCachedResponse(cached)
+        return logFinalResponse(
+          request,
+          requestUrl,
+          negativeCache.createCachedResponse(cached),
+          startedAtMs,
+        )
       }
     }
 
@@ -494,11 +675,16 @@ export async function handleDispatchRequest(
         })
 
         // body 已被 cacheStream 完整消费，clientStream 数据已就绪，无需超时保护
-        return new Response(clientBody, {
-          status: relayResponse.status,
-          statusText: relayResponse.statusText,
-          headers: createClientResponseHeaders(relayResponse, ingress.upstreamUrl),
-        })
+        return logFinalResponse(
+          request,
+          requestUrl,
+          new Response(clientBody, {
+            status: relayResponse.status,
+            statusText: relayResponse.statusText,
+            headers: createClientResponseHeaders(relayResponse, ingress.upstreamUrl),
+          }),
+          startedAtMs,
+        )
       }
 
       // 非可缓存状态码：仅当存在缓存条目时才清除（探测成功场景）
@@ -513,16 +699,31 @@ export async function handleDispatchRequest(
       }
     }
 
-    return createClientResponse(
-      relayResponse,
-      config.relayResponseTimeoutMs,
-      ingress.upstreamUrl,
+    return logFinalResponse(
+      request,
+      requestUrl,
+      createClientResponse(
+        relayResponse,
+        config.relayResponseTimeoutMs,
+        ingress.upstreamUrl,
+      ),
+      startedAtMs,
     )
   } catch (error) {
     if (error instanceof DispatchError) {
-      return error.toResponse()
+      return logFinalResponse(
+        request,
+        requestUrl,
+        error.toResponse(),
+        startedAtMs,
+      )
     }
 
-    return jsonErrorResponse(502, 'RELAY_FETCH_FAILED', '内部 relay 请求失败')
+    return logFinalResponse(
+      request,
+      requestUrl,
+      jsonErrorResponse(502, 'RELAY_FETCH_FAILED', '内部 relay 请求失败'),
+      startedAtMs,
+    )
   }
 }

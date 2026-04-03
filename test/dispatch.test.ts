@@ -391,6 +391,39 @@ describe('handleDispatchRequest', () => {
     )
   })
 
+  it('logs a readable info line for 301 responses with rewritten location', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: 'https://login.example.com/oauth/start?client_id=abc',
+          },
+        }),
+    )
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses'),
+        createEnv(),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(301)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[wrangler:info\] GET \/ssl\/api\.openai\.com\/v1\/responses 301 Moved Permanently \(\d+ms\)$/,
+        ),
+        expect.objectContaining({
+          location: '/ssl/login.example.com/oauth/start?client_id=abc',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
   it('preserves a Refresh header without url unchanged', async () => {
     const fetchSpy = vi.fn(
       async () =>
@@ -410,6 +443,142 @@ describe('handleDispatchRequest', () => {
 
     expect(response.status).toBe(200)
     expect(response.headers.get('refresh')).toBe('5')
+  })
+
+  it('logs local 400 DispatchError details in a readable info line', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl'),
+        createEnv(),
+      )
+
+      expect(response.status).toBe(400)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[wrangler:info\] GET \/ssl 400 Bad Request \(\d+ms\)$/,
+        ),
+        expect.objectContaining({
+          error: 'MISSING_AUTHORITY',
+          message: '缺少上游 authority',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('logs upstream 401 error details in a readable info line', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'invalid_api_key',
+              message: 'Invalid API key',
+            },
+          }),
+          {
+            status: 401,
+            headers: {
+              'content-type': 'application/json; charset=utf-8',
+            },
+          },
+        ),
+    )
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses'),
+        createEnv(),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(401)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[wrangler:info\] GET \/ssl\/api\.openai\.com\/v1\/responses 401 Unauthorized \(\d+ms\)$/,
+        ),
+        expect.objectContaining({
+          error: 'invalid_api_key',
+          message: 'Invalid API key',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('logs upstream 502 error details in a readable info line', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'upstream_unavailable',
+              message: 'Upstream temporarily unavailable',
+            },
+          }),
+          {
+            status: 502,
+            headers: {
+              'content-type': 'application/json; charset=utf-8',
+            },
+          },
+        ),
+    )
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses'),
+        createEnv(),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(502)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[wrangler:info\] GET \/ssl\/api\.openai\.com\/v1\/responses 502 Bad Gateway \(\d+ms\)$/,
+        ),
+        expect.objectContaining({
+          error: 'upstream_unavailable',
+          message: 'Upstream temporarily unavailable',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('logs local 502 relay fetch failure details in a readable info line', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(async () => {
+      throw new Error('selected proxy failed')
+    })
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/example.com/v1/chat'),
+        createEnv(),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(502)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[wrangler:info\] GET \/ssl\/example\.com\/v1\/chat 502 Bad Gateway \(\d+ms\)$/,
+        ),
+        expect.objectContaining({
+          error: 'RELAY_FETCH_FAILED',
+          message: '内部 relay 请求失败',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
   })
 
   it('does not switch to another proxy when the selected node fails', async () => {

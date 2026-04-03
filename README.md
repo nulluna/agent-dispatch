@@ -177,6 +177,11 @@ hop-by-hop 头部（`Connection`、`Transfer-Encoding`、`Host`、`Content-Lengt
 - 不会自动 failover 到池中的下一个节点
 - 响应流在 relay 阶段超时后会直接中断
 
+## 日志语义
+
+- 最终返回给客户端的 `3xx` 响应会输出一条可读的 `info` 日志，格式类似 `[wrangler:info] GET /path 301 Moved Permanently (1ms)`，并附带重写后的 `location` / `refresh`
+- 最终返回给客户端的 `4xx/5xx` 响应会输出同样格式的 `info` 日志，并尽量从 JSON 或文本响应中提取 `error` / `message`
+
 ## 快速开始
 
 ```bash
