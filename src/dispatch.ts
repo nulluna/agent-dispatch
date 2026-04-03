@@ -1,6 +1,7 @@
 import { getRuntimeConfig, type DispatchEnv } from './config'
 import { DispatchError, jsonErrorResponse } from './errors'
 import { createRelayHeaders, cloneResponseHeaders } from './headers'
+import { detectLlmRequestInfo, type LlmRequestInfo } from './request-protocol'
 import { resolveIngressRequest } from './routing'
 import {
   createDispatchState,
@@ -396,14 +397,32 @@ function formatResponseInfoLine(
   return `[wrangler:info] ${request.method} ${formatRequestPath(requestUrl)} ${response.status} ${getResponseStatusText(response)} (${durationMs}ms)`
 }
 
+function buildRequestInfoLogFields(requestInfo: LlmRequestInfo | null): Record<string, string> {
+  if (!requestInfo) {
+    return {}
+  }
+
+  return {
+    protocol: requestInfo.protocol,
+    modelId: requestInfo.modelId,
+    userAgent: requestInfo.userAgent,
+  }
+}
+
 async function logFinalResponse(
   request: Request,
   requestUrl: URL,
   response: Response,
   startedAtMs: number,
+  requestInfo: LlmRequestInfo | null = null,
 ): Promise<Response> {
+  const requestInfoFields = buildRequestInfoLogFields(requestInfo)
+
   if (response.status >= 300 && response.status < 400) {
-    const details = build3xxLogFields(response)
+    const details = {
+      ...requestInfoFields,
+      ...build3xxLogFields(response),
+    }
 
     if (Object.keys(details).length > 0) {
       console.info(formatResponseInfoLine(request, requestUrl, response, startedAtMs), details)
@@ -413,8 +432,16 @@ async function logFinalResponse(
   }
 
   if (response.status >= 400 && response.status < 600) {
-    const details = await buildErrorLogFields(response)
+    const details = {
+      ...requestInfoFields,
+      ...(await buildErrorLogFields(response)),
+    }
     console.info(formatResponseInfoLine(request, requestUrl, response, startedAtMs), details)
+    return response
+  }
+
+  if (Object.keys(requestInfoFields).length > 0) {
+    console.info(formatResponseInfoLine(request, requestUrl, response, startedAtMs), requestInfoFields)
   }
 
   return response
@@ -545,6 +572,7 @@ export async function handleDispatchRequest(
 ): Promise<Response> {
   const startedAtMs = Date.now()
   const requestUrl = new URL(request.url)
+  let requestInfo: LlmRequestInfo | null = null
 
   try {
     const config = getRuntimeConfig(env)
@@ -565,13 +593,16 @@ export async function handleDispatchRequest(
       request.headers,
       state,
     )
+    const hasBody = request.body !== null && request.method !== 'GET' && request.method !== 'HEAD'
+    const bufferedBody = hasBody ? await new Response(request.body).arrayBuffer() : null
+    requestInfo = detectLlmRequestInfo(request, ingress.upstreamUrl, bufferedBody)
 
     // 负向缓存：构建缓存 key
     const negativeCache = state.negativeCache
     let cacheKey: string | null = null
     let accountBound = false
 
-    if (selection.strategy === 'hash') {
+    if (config.negativeCacheEnabled && selection.strategy === 'hash') {
       const accountId = selection.selectionMode === 'sticky-hash'
         ? selection.accountHash
         : `__site:${ingress.authority}`
@@ -598,6 +629,7 @@ export async function handleDispatchRequest(
           requestUrl,
           negativeCache.createCachedResponse(cached),
           startedAtMs,
+          requestInfo,
         )
       }
     }
@@ -630,8 +662,6 @@ export async function handleDispatchRequest(
       ingress.authority,
       ingress.upstreamUrl,
     )
-    const hasBody = request.body !== null && request.method !== 'GET' && request.method !== 'HEAD'
-    const bufferedBody = hasBody ? await new Response(request.body).arrayBuffer() : null
     const createRelayRequest = createRelayRequestFactory(request, relayUrl, bufferedBody)
     const resolvedFetch = createDnsResolveFetch(fetchImplementation, config.dnsResolve)
 
@@ -684,6 +714,7 @@ export async function handleDispatchRequest(
             headers: createClientResponseHeaders(relayResponse, ingress.upstreamUrl),
           }),
           startedAtMs,
+          requestInfo,
         )
       }
 
@@ -708,6 +739,7 @@ export async function handleDispatchRequest(
         ingress.upstreamUrl,
       ),
       startedAtMs,
+      requestInfo,
     )
   } catch (error) {
     if (error instanceof DispatchError) {
@@ -716,6 +748,7 @@ export async function handleDispatchRequest(
         requestUrl,
         error.toResponse(),
         startedAtMs,
+        requestInfo,
       )
     }
 
@@ -724,6 +757,7 @@ export async function handleDispatchRequest(
       requestUrl,
       jsonErrorResponse(502, 'RELAY_FETCH_FAILED', '内部 relay 请求失败'),
       startedAtMs,
+      requestInfo,
     )
   }
 }

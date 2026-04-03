@@ -80,6 +80,7 @@ POST /ssl/api.openai.com/v1/responses
 - 当请求既没有 session Cookie，也没有可用认证头时，按 `target site` 维度缓存一个后端索引 1 小时
 - 同一 `target site` 的无身份请求在缓存期内保持固定，缓存过期后按 `0 -> 1 -> ... -> N-1 -> 0` 轮转
 - 池长度或顺序变化会导致映射重排（非一致性哈希）
+- 负向缓存默认关闭；仅在 `DISPATCH_NEGATIVE_CACHE_ENABLED=true` 时，才会缓存 `401/403/404/405/410/429`
 
 ## 配置项
 
@@ -88,6 +89,7 @@ POST /ssl/api.openai.com/v1/responses
 | `AGENTPROXY_POOL` | 是 | 逗号分隔的 agent-proxy 节点列表，例如 `https://a.internal,https://b.internal` |
 | `DISPATCH_SECRET` | 是 | 与所有 agent-proxy 节点共享的 relay secret |
 | `DISPATCH_STRATEGY` | 否 | `poll`（默认）或 `hash` |
+| `DISPATCH_NEGATIVE_CACHE_ENABLED` | 否 | 是否启用 `hash` 策略下的负向缓存，默认 `false` |
 | `RELAY_CONNECT_TIMEOUT_MS` | 否 | 内部 relay 连接超时（毫秒） |
 | `RELAY_RESPONSE_TIMEOUT_MS` | 否 | 内部 relay 响应流超时（毫秒） |
 
@@ -119,6 +121,7 @@ npm run dev
 AGENTPROXY_POOL="https://a.example.com,https://b.example.com"
 DISPATCH_SECRET="replace-with-your-shared-secret"
 DISPATCH_STRATEGY="poll"
+DISPATCH_NEGATIVE_CACHE_ENABLED="false"
 RELAY_CONNECT_TIMEOUT_MS="10000"
 RELAY_RESPONSE_TIMEOUT_MS="30000"
 ```
@@ -152,7 +155,7 @@ npx wrangler secret put AGENTPROXY_POOL --env production
 npx wrangler deploy --env production
 ```
 
-`DISPATCH_STRATEGY`、`RELAY_CONNECT_TIMEOUT_MS` 和 `RELAY_RESPONSE_TIMEOUT_MS` 没有配置时会回退到代码默认值；如果你需要为 `production` 显式覆盖它们，可以在 Cloudflare Dashboard 中为 `production` 环境单独设置。
+`DISPATCH_STRATEGY`、`DISPATCH_NEGATIVE_CACHE_ENABLED`、`RELAY_CONNECT_TIMEOUT_MS` 和 `RELAY_RESPONSE_TIMEOUT_MS` 没有配置时会回退到代码默认值；如果你需要为 `production` 显式覆盖它们，可以在 Cloudflare Dashboard 中为 `production` 环境单独设置。
 
 ## 透明转发边界
 
@@ -201,7 +204,7 @@ npm run build        # Wrangler dry-run 构建
 ## 迁移指南
 
 1. 在所有 agent-proxy 节点配置相同的 `DISPATCH_SECRET`，确认 `/relay/<secret>/proxyssl/...` 可用
-2. 部署 agent-dispatch，配置 `AGENTPROXY_POOL`、`DISPATCH_STRATEGY` 和超时参数
+2. 部署 agent-dispatch，配置 `AGENTPROXY_POOL`、`DISPATCH_STRATEGY`、`DISPATCH_NEGATIVE_CACHE_ENABLED` 和超时参数
 3. 将应用入口从"直连 agent-proxy"切换到"访问本地 agent-dispatch 的 `/<site>/...` 或 `/ssl/<site>/...`"
 4. 切换完成后，直接访问 agent-proxy 的旧 `/proxy`、`/proxyssl` 入口将持续返回 `404`
 

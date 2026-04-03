@@ -114,6 +114,43 @@ describe('handleDispatchRequest', () => {
     }
   })
 
+  it('logs protocol, model id, and user-agent for recognized requests on successful responses', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(async () => new Response('ok', { status: 200, statusText: 'OK' }))
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/responses', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'dispatch-test',
+          },
+          body: JSON.stringify({
+            model: 'gpt-5',
+            input: 'hello',
+          }),
+        }),
+        createEnv(),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(200)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[wrangler:info\] POST \/ssl\/api\.openai\.com\/v1\/responses 200 OK \(\d+ms\)$/,
+        ),
+        expect.objectContaining({
+          protocol: 'openai-responses',
+          modelId: 'gpt-5',
+          userAgent: 'dispatch-test',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
   it('does not log request headers or hash details below debug level', async () => {
     const debugSpy = vi.spyOn(console, 'debug').mockImplementation(() => undefined)
     const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
@@ -511,6 +548,61 @@ describe('handleDispatchRequest', () => {
     }
   })
 
+  it('merges protocol fields into readable info logs for recognized error responses', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              code: 'invalid_api_key',
+              message: 'Invalid API key',
+            },
+          }),
+          {
+            status: 401,
+            headers: {
+              'content-type': 'application/json; charset=utf-8',
+            },
+          },
+        ),
+    )
+
+    try {
+      const response = await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/chat/completions', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'User-Agent': 'dispatch-test',
+          },
+          body: JSON.stringify({
+            model: 'gpt-4.1',
+            messages: [{ role: 'user', content: 'hello' }],
+          }),
+        }),
+        createEnv(),
+        fetchSpy,
+      )
+
+      expect(response.status).toBe(401)
+      expect(infoSpy).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[wrangler:info\] POST \/ssl\/api\.openai\.com\/v1\/chat\/completions 401 Unauthorized \(\d+ms\)$/,
+        ),
+        expect.objectContaining({
+          protocol: 'openai-chat-completions',
+          modelId: 'gpt-4.1',
+          userAgent: 'dispatch-test',
+          error: 'invalid_api_key',
+          message: 'Invalid API key',
+        }),
+      )
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
   it('logs upstream 502 error details in a readable info line', async () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
     const fetchSpy = vi.fn(
@@ -849,7 +941,7 @@ describe('handleDispatchRequest', () => {
 
   // --- 负向缓存集成测试 ---
 
-  it('caches a 401 response under hash strategy and serves from cache on second request', async () => {
+  it('does not use negative cache under hash strategy when cache is not explicitly enabled', async () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
     const state = createDispatchState()
     let callCount = 0
@@ -870,17 +962,53 @@ describe('handleDispatchRequest', () => {
       })
 
     try {
-      // 第一次请求：转发到上游，收到 401
       const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
       expect(response1.status).toBe(401)
       expect(await response1.text()).toBe('unauthorized')
       expect(callCount).toBe(1)
 
-      // 第二次请求：命中缓存，不转发
       const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
       expect(response2.status).toBe(401)
       expect(await response2.text()).toBe('unauthorized')
-      expect(callCount).toBe(1) // fetchSpy 未被再次调用
+      expect(callCount).toBe(2)
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
+  it('caches a 401 response under hash strategy when negative cache is explicitly enabled', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const state = createDispatchState()
+    let callCount = 0
+
+    const fetchSpy = vi.fn(async () => {
+      callCount++
+      return new Response('unauthorized', { status: 401 })
+    })
+
+    const env = {
+      ...createEnv({
+        DISPATCH_STRATEGY: 'hash',
+        AGENTPROXY_POOL: 'https://proxy-a.internal',
+      }),
+      DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
+    } as DispatchEnv & { DISPATCH_NEGATIVE_CACHE_ENABLED: string }
+
+    const makeRequest = () =>
+      createRequest('/ssl/api.openai.com/v1/responses?model=gpt-4', {
+        headers: { Authorization: 'Bearer test-key' },
+      })
+
+    try {
+      const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response1.status).toBe(401)
+      expect(await response1.text()).toBe('unauthorized')
+      expect(callCount).toBe(1)
+
+      const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response2.status).toBe(401)
+      expect(await response2.text()).toBe('unauthorized')
+      expect(callCount).toBe(1)
 
       expect(infoSpy).toHaveBeenCalledWith(
         '[agent-dispatch] negative cache hit',
@@ -907,6 +1035,7 @@ describe('handleDispatchRequest', () => {
       const env = createEnv({
         DISPATCH_STRATEGY: 'hash',
         AGENTPROXY_POOL: 'https://proxy-a.internal',
+        DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
       })
 
       // 无 auth header → site-fallback 模式
@@ -950,6 +1079,7 @@ describe('handleDispatchRequest', () => {
     const env = createEnv({
       DISPATCH_STRATEGY: 'hash',
       AGENTPROXY_POOL: 'https://proxy-a.internal',
+      DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
     })
 
     const makeRequest = () =>
@@ -992,6 +1122,7 @@ describe('handleDispatchRequest', () => {
     const env = createEnv({
       DISPATCH_STRATEGY: 'hash',
       AGENTPROXY_POOL: 'https://proxy-a.internal',
+      DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
     })
 
     const makeRequest = () =>
@@ -1064,6 +1195,7 @@ describe('handleDispatchRequest', () => {
       const env = createEnv({
         DISPATCH_STRATEGY: 'hash',
         AGENTPROXY_POOL: 'https://proxy-a.internal',
+        DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
       })
 
       const makeRequest = () =>

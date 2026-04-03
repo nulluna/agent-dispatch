@@ -4,6 +4,7 @@ export interface DispatchEnv {
   AGENTPROXY_POOL?: string
   DISPATCH_SECRET?: string
   DISPATCH_STRATEGY?: string
+  DISPATCH_NEGATIVE_CACHE_ENABLED?: string
   LOG_LEVEL?: string
   RELAY_CONNECT_TIMEOUT_MS?: string
   RELAY_RESPONSE_TIMEOUT_MS?: string
@@ -19,6 +20,7 @@ export interface RuntimeConfig {
   agentproxyPool: URL[]
   dispatchSecret: string
   dispatchStrategy: DispatchStrategy
+  negativeCacheEnabled: boolean
   logLevel: LogLevel
   relayConnectTimeoutMs: number
   relayResponseTimeoutMs: number
@@ -49,6 +51,24 @@ function parseDispatchStrategy(value?: string): DispatchStrategy {
   }
 
   throw new DispatchError(500, 'INVALID_CONFIGURATION', 'DISPATCH_STRATEGY 配置无效')
+}
+
+function parseBooleanFlag(value: string | undefined, fallback: boolean): boolean {
+  if (value === undefined || value.trim() === '') {
+    return fallback
+  }
+
+  const normalized = value.trim().toLowerCase()
+
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) {
+    return true
+  }
+
+  if (['0', 'false', 'no', 'off'].includes(normalized)) {
+    return false
+  }
+
+  throw new DispatchError(500, 'INVALID_CONFIGURATION', '布尔配置必须是 true/false、1/0、yes/no 或 on/off')
 }
 
 function parseLogLevel(value?: string): LogLevel {
@@ -129,6 +149,7 @@ export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
     agentproxyPool: parseAgentproxyPool(env.AGENTPROXY_POOL),
     dispatchSecret,
     dispatchStrategy: parseDispatchStrategy(env.DISPATCH_STRATEGY),
+    negativeCacheEnabled: parseBooleanFlag(env.DISPATCH_NEGATIVE_CACHE_ENABLED, false),
     logLevel: parseLogLevel(env.LOG_LEVEL),
     relayConnectTimeoutMs: parsePositiveInteger(env.RELAY_CONNECT_TIMEOUT_MS, 10_000),
     relayResponseTimeoutMs: parsePositiveInteger(env.RELAY_RESPONSE_TIMEOUT_MS, 30_000),

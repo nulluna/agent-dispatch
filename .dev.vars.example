@@ -1,5 +1,6 @@
 AGENTPROXY_POOL="https://a.example.com,https://b.example.com"
 DISPATCH_SECRET="replace-with-your-shared-secret"
 DISPATCH_STRATEGY="poll"
+DISPATCH_NEGATIVE_CACHE_ENABLED="false"
 RELAY_CONNECT_TIMEOUT_MS="10000"
 RELAY_RESPONSE_TIMEOUT_MS="30000"
