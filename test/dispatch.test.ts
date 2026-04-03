@@ -372,6 +372,33 @@ describe('handleDispatchRequest', () => {
         code: 'RELAY_CONNECT_TIMEOUT',
       },
     })
+    // (c) 验证 timeout 失败计数
+    expect(state.relayStats.timeoutFailures).toBe(4)
+    expect(state.relayStats.retrySuccesses).toBe(0)
+  })
+
+  it('tracks relay stats when retry succeeds after timeout failures', async () => {
+    const state = createDispatchState()
+    let callCount = 0
+
+    const fetchSpy = vi.fn(async () => {
+      callCount++
+      if (callCount <= 2) {
+        return new Promise<Response>(() => undefined)
+      }
+      return new Response('ok', { status: 200 })
+    })
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/example.com/v1/chat'),
+      createEnv({ RELAY_CONNECT_TIMEOUT_MS: '5' }),
+      fetchSpy,
+      state,
+    )
+
+    expect(response.status).toBe(200)
+    expect(state.relayStats.timeoutFailures).toBe(2)
+    expect(state.relayStats.retrySuccesses).toBe(1)
   })
 
   it('fails the client stream when the relay response body exceeds the configured timeout', async () => {

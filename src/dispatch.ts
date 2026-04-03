@@ -7,6 +7,7 @@ import {
   selectAgentproxy,
   type DispatchSelection,
   type DispatchState,
+  type RelayStats,
 } from './strategy'
 
 export type { DispatchEnv } from './config'
@@ -188,6 +189,8 @@ async function fetchRelayResponse(
   createRequest: (signal: AbortSignal) => Request,
   fetchImplementation: FetchImplementation,
   timeoutMs: number,
+  backendInfo: { backend: string; proxyIndex: number },
+  relayStats: RelayStats,
 ): Promise<Response> {
   const maxAttempts = RELAY_RETRY_DELAYS_MS.length + 1
   let lastError: unknown
@@ -198,27 +201,57 @@ async function fetchRelayResponse(
       if (delay > 0) {
         await new Promise(resolve => setTimeout(resolve, delay))
       }
-      console.info('[agent-dispatch] relay connect retry', { attempt, delay })
+      // (a) 输出本次 retry 的 backend 信息
+      console.info('[agent-dispatch] relay connect retry', {
+        attempt,
+        delay,
+        backend: backendInfo.backend,
+        proxyIndex: backendInfo.proxyIndex,
+      })
     }
 
+    // (b) 每次 retry 使用独立的 AbortController，确保新建连接
     const abortController = new AbortController()
     let timeoutId: ReturnType<typeof setTimeout> | undefined
 
     try {
-      return await new Promise<Response>((resolve, reject) => {
+      const response = await new Promise<Response>((resolve, reject) => {
         timeoutId = setTimeout(() => {
           abortController.abort()
           reject(new DispatchError(504, 'RELAY_CONNECT_TIMEOUT', '内部 relay 连接超时'))
         }, timeoutMs)
 
+        // (b) 每次调用 createRequest 生成新 Request 实例，避免复用被中止的连接
         fetchImplementation(createRequest(abortController.signal)).then(resolve, reject)
       })
+
+      // (c) 记录 retry 成功
+      if (attempt > 0) {
+        relayStats.retrySuccesses++
+        console.info('[agent-dispatch] relay retry succeeded', {
+          attempt,
+          backend: backendInfo.backend,
+          totalTimeoutFailures: relayStats.timeoutFailures,
+          totalRetrySuccesses: relayStats.retrySuccesses,
+        })
+      }
+
+      return response
     } catch (error) {
       lastError = error
       // 仅对 relay 连接超时重试，其他错误立即抛出
       if (!(error instanceof DispatchError && error.code === 'RELAY_CONNECT_TIMEOUT')) {
         throw error
       }
+      // (c) 记录 timeout 失败
+      relayStats.timeoutFailures++
+      console.warn('[agent-dispatch] relay connect timeout', {
+        attempt,
+        backend: backendInfo.backend,
+        proxyIndex: backendInfo.proxyIndex,
+        totalTimeoutFailures: relayStats.timeoutFailures,
+        totalRetrySuccesses: relayStats.retrySuccesses,
+      })
     } finally {
       clearTimeout(timeoutId)
     }
@@ -321,6 +354,8 @@ export async function handleDispatchRequest(
       createRelayRequest,
       fetchImplementation,
       config.relayConnectTimeoutMs,
+      { backend: proxyBaseUrl.toString(), proxyIndex },
+      state.relayStats,
     )
 
     // 负向缓存：记录上游响应

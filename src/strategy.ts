@@ -3,10 +3,16 @@ import { NegativeResponseCache } from './negative-cache'
 
 const SITE_FALLBACK_TTL_MS = 60 * 60 * 1000
 
+export interface RelayStats {
+  timeoutFailures: number
+  retrySuccesses: number
+}
+
 export interface DispatchState {
   nextPollIndex: number
   siteFallbackSelections: Map<string, SiteFallbackSelectionState>
   negativeCache: NegativeResponseCache
+  relayStats: RelayStats
 }
 
 interface SiteFallbackSelectionState {
@@ -51,6 +57,7 @@ export function createDispatchState(): DispatchState {
     nextPollIndex: 0,
     siteFallbackSelections: new Map(),
     negativeCache: new NegativeResponseCache(),
+    relayStats: { timeoutFailures: 0, retrySuccesses: 0 },
   }
 }
 

@@ -3,6 +3,7 @@ dist/
 .wrangler/
 .wrangler-dist/
 .spec-workflow/
+.zcf/
 coverage/
 
 # Environment & secrets
