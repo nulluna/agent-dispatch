@@ -7,13 +7,28 @@ function createHeaders(init: Record<string, string> = {}): Headers {
 }
 
 describe('selectAgentproxyIndex', () => {
-  it('advances poll routing in pool order and wraps within the same local instance', () => {
-    const state = createDispatchState()
+  it('keeps poll routing sticky per site for 8 seconds and refreshes on access', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-03T00:00:00.000Z'))
 
-    expect(selectAgentproxyIndex('poll', 3, 'example.com', createHeaders(), state)).toBe(0)
-    expect(selectAgentproxyIndex('poll', 3, 'example.com', createHeaders(), state)).toBe(1)
-    expect(selectAgentproxyIndex('poll', 3, 'example.com', createHeaders(), state)).toBe(2)
-    expect(selectAgentproxyIndex('poll', 3, 'example.com', createHeaders(), state)).toBe(0)
+    try {
+      const state = createDispatchState()
+
+      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
+      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
+      expect(selectAgentproxyIndex('poll', 3, 'two.cc', createHeaders(), state)).toBe(1)
+
+      vi.advanceTimersByTime(7_900)
+      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
+
+      vi.advanceTimersByTime(7_900)
+      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
+
+      vi.advanceTimersByTime(8_100)
+      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('keeps hash routing stable for the same site and new-api-user header', () => {

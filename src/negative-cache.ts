@@ -172,6 +172,16 @@ export class NegativeResponseCache {
     return this.cacheableStatuses.has(status)
   }
 
+  delete(key: string): void {
+    const entry = this.entries.get(key)
+
+    if (!entry) {
+      return
+    }
+
+    this.removeEntry(key, entry)
+  }
+
   private removeEntry(key: string, entry: NegativeCacheEntry): void {
     this.entries.delete(key)
     this.totalBytes -= entry.estimatedBytes

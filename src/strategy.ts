@@ -2,6 +2,7 @@ import type { DispatchStrategy } from './config'
 import { NegativeResponseCache } from './negative-cache'
 
 const SITE_FALLBACK_TTL_MS = 60 * 60 * 1000
+const POLL_SITE_TTL_MS = 8 * 1000
 
 export interface RelayStats {
   timeoutFailures: number
@@ -10,9 +11,15 @@ export interface RelayStats {
 
 export interface DispatchState {
   nextPollIndex: number
+  pollSiteSelections: Map<string, SitePollSelectionState>
   siteFallbackSelections: Map<string, SiteFallbackSelectionState>
   negativeCache: NegativeResponseCache
   relayStats: RelayStats
+}
+
+interface SitePollSelectionState {
+  index: number
+  expiresAt: number
 }
 
 interface SiteFallbackSelectionState {
@@ -55,6 +62,7 @@ export type DispatchSelection =
 export function createDispatchState(): DispatchState {
   return {
     nextPollIndex: 0,
+    pollSiteSelections: new Map(),
     siteFallbackSelections: new Map(),
     negativeCache: new NegativeResponseCache(),
     relayStats: { timeoutFailures: 0, retrySuccesses: 0 },
@@ -271,6 +279,41 @@ function selectSiteFallback(
   }
 }
 
+function selectSitePoll(
+  poolLength: number,
+  targetSite: string,
+  state: DispatchState,
+): PollDispatchSelection {
+  const now = Date.now()
+  const cachedSelection = state.pollSiteSelections.get(targetSite)
+
+  if (cachedSelection && now < cachedSelection.expiresAt) {
+    const normalizedIndex = cachedSelection.index % poolLength
+    cachedSelection.index = normalizedIndex
+    cachedSelection.expiresAt = now + POLL_SITE_TTL_MS
+
+    return {
+      strategy: 'poll',
+      poolLength,
+      proxyIndex: normalizedIndex,
+    }
+  }
+
+  const index = state.nextPollIndex % poolLength
+
+  state.nextPollIndex = (index + 1) % poolLength
+  state.pollSiteSelections.set(targetSite, {
+    index,
+    expiresAt: now + POLL_SITE_TTL_MS,
+  })
+
+  return {
+    strategy: 'poll',
+    poolLength,
+    proxyIndex: index,
+  }
+}
+
 export function selectAgentproxy(
   strategy: DispatchStrategy,
   poolLength: number,
@@ -283,15 +326,7 @@ export function selectAgentproxy(
   }
 
   if (strategy === 'poll') {
-    const index = state.nextPollIndex % poolLength
-
-    state.nextPollIndex = (index + 1) % poolLength
-
-    return {
-      strategy,
-      poolLength,
-      proxyIndex: index,
-    }
+    return selectSitePoll(poolLength, targetSite, state)
   }
 
   const stickyIdentifier = resolveStickyIdentifier(headers)

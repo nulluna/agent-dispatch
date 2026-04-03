@@ -5,6 +5,8 @@ dist/
 .spec-workflow/
 .zcf/
 coverage/
+docs/
+tmp/
 
 # Environment & secrets
 .env
@@ -17,4 +19,4 @@ coverage/
 
 # OS
 .DS_Store
-/docs/
+

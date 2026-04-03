@@ -81,6 +81,7 @@ const SENSITIVE_HEADER_NAMES = new Set([
   'cookie',
   'set-cookie',
 ])
+const CHALLENGE_SET_COOKIE_PATTERN = /(?:^|[;,]\s*)(acw_tc|cdn_sec_tc|acw_sc__v2)=/i
 
 function isSensitiveHeader(name: string): boolean {
   return SENSITIVE_HEADER_NAMES.has(name) || name.includes('token') || name.includes('secret')
@@ -114,6 +115,32 @@ function redactHeaderRecord(headers: Record<string, string>): Record<string, str
   }
 
   return redacted
+}
+
+function getSetCookieHeaderValues(headers: Headers): string[] {
+  const getSetCookie = (
+    headers as Headers & { getSetCookie?: () => string[] }
+  ).getSetCookie
+
+  if (typeof getSetCookie === 'function') {
+    const values = getSetCookie.call(headers)
+
+    if (values.length > 0) {
+      return values
+    }
+  }
+
+  const singleValue = headers.get('set-cookie')
+
+  return singleValue ? [singleValue] : []
+}
+
+function hasChallengeSetCookie(headers: Headers): boolean {
+  return getSetCookieHeaderValues(headers).some(value => CHALLENGE_SET_COOKIE_PATTERN.test(value))
+}
+
+function isChallengeResponse(response: Response): boolean {
+  return response.headers.has('x-tengine-error') || hasChallengeSetCookie(response.headers)
 }
 
 function serializeSelection(selection: DispatchSelection): Record<string, number | string> {
@@ -695,10 +722,11 @@ export async function handleDispatchRequest(
       { backend: proxyBaseUrl.toString(), proxyIndex },
       state.relayStats,
     )
+    const challengeResponse = isChallengeResponse(relayResponse)
 
     // 负向缓存：记录上游响应
     if (cacheKey) {
-      if (negativeCache.isCacheableStatus(relayResponse.status)) {
+      if (negativeCache.isCacheableStatus(relayResponse.status) && !challengeResponse) {
         // 可缓存状态码：tee 流，一份缓存一份返回客户端
         const responseBody = relayResponse.body
         let cacheBody: ArrayBuffer
@@ -741,8 +769,12 @@ export async function handleDispatchRequest(
         )
       }
 
+      if (challengeResponse) {
+        negativeCache.delete(cacheKey)
+      }
+
       // 非可缓存状态码：仅当存在缓存条目时才清除（探测成功场景）
-      if (negativeCache.entries.has(cacheKey)) {
+      if (!challengeResponse && negativeCache.entries.has(cacheKey)) {
         negativeCache.recordResponse(
           cacheKey,
           relayResponse.status,

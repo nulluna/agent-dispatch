@@ -1056,6 +1056,52 @@ describe('handleDispatchRequest', () => {
     }
   })
 
+  it('does not cache challenge-shaped 401 responses under hash strategy', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const state = createDispatchState()
+    let callCount = 0
+
+    const fetchSpy = vi.fn(async () => {
+      callCount++
+
+      const headers = new Headers({
+        'content-type': 'application/json',
+      })
+      headers.append('set-cookie', 'acw_tc=challenge-1; Path=/; HttpOnly')
+      headers.append('set-cookie', 'cdn_sec_tc=challenge-1; Path=/; HttpOnly')
+
+      return new Response('challenge unauthorized', {
+        status: 401,
+        headers,
+      })
+    })
+
+    const env = createEnv({
+      DISPATCH_STRATEGY: 'hash',
+      AGENTPROXY_POOL: 'https://proxy-a.internal',
+      DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
+    })
+
+    const makeRequest = () =>
+      createRequest('/ssl/anyrouter.top/v1/models', {
+        headers: { Authorization: 'Bearer test-key' },
+      })
+
+    try {
+      const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response1.status).toBe(401)
+      expect(await response1.text()).toBe('challenge unauthorized')
+      expect(callCount).toBe(1)
+
+      const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response2.status).toBe(401)
+      expect(await response2.text()).toBe('challenge unauthorized')
+      expect(callCount).toBe(2)
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
   it('caches a 404 response under hash site-fallback with 30s TTL', async () => {
     vi.useFakeTimers()
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
@@ -1254,6 +1300,71 @@ describe('handleDispatchRequest', () => {
       // 缓存已清除，后续请求直接转发
       const response3 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
       expect(response3.status).toBe(200)
+      expect(callCount).toBe(3)
+    } finally {
+      infoSpy.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  it('clears stale negative cache entries when a probe returns a challenge response', async () => {
+    vi.useFakeTimers()
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+
+    try {
+      const state = createDispatchState()
+      let callCount = 0
+
+      const fetchSpy = vi.fn(async () => {
+        callCount++
+
+        if (callCount === 1) {
+          return new Response('unauthorized', { status: 401 })
+        }
+
+        const headers = new Headers({
+          'content-type': 'application/json',
+        })
+        headers.append('set-cookie', 'acw_tc=challenge-2; Path=/; HttpOnly')
+        headers.append('set-cookie', 'cdn_sec_tc=challenge-2; Path=/; HttpOnly')
+
+        return new Response('challenge unauthorized', {
+          status: 401,
+          headers,
+        })
+      })
+
+      const env = createEnv({
+        DISPATCH_STRATEGY: 'hash',
+        AGENTPROXY_POOL: 'https://proxy-a.internal',
+        DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
+      })
+
+      const makeRequest = () =>
+        createRequest('/ssl/anyrouter.top/v1/models', {
+          headers: { Authorization: 'Bearer test-key' },
+        })
+
+      const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response1.status).toBe(401)
+      expect(await response1.text()).toBe('unauthorized')
+      expect(callCount).toBe(1)
+
+      const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response2.status).toBe(401)
+      expect(await response2.text()).toBe('unauthorized')
+      expect(callCount).toBe(1)
+
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1)
+
+      const probeResponse = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(probeResponse.status).toBe(401)
+      expect(await probeResponse.text()).toBe('challenge unauthorized')
+      expect(callCount).toBe(2)
+
+      const response4 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response4.status).toBe(401)
+      expect(await response4.text()).toBe('challenge unauthorized')
       expect(callCount).toBe(3)
     } finally {
       infoSpy.mockRestore()
