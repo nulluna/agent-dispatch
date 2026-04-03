@@ -13,8 +13,11 @@
  *   node scripts/wrangler.mjs dev
  */
 
+import { spawn } from 'node:child_process'
 import { readFileSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 function readDevVars(key) {
   try {
@@ -46,18 +49,38 @@ function readDevVars(key) {
 }
 
 const dnsServerValue = process.env.DNS_SERVER?.trim() || readDevVars('DNS_SERVER')
+const require = createRequire(import.meta.url)
+const wranglerCliPath = require.resolve('wrangler/wrangler-dist/cli.js')
+const dnsPreloadPath = fileURLToPath(new URL('./wrangler-dns-preload.cjs', import.meta.url))
+const child = spawn(
+  process.execPath,
+  [
+    '--no-warnings',
+    '--experimental-vm-modules',
+    ...process.execArgv,
+    ...(dnsServerValue ? ['--require', dnsPreloadPath] : []),
+    wranglerCliPath,
+    ...process.argv.slice(2),
+  ],
+  {
+    env: dnsServerValue
+      ? {
+          ...process.env,
+          AGENT_DISPATCH_DNS_SERVER: dnsServerValue,
+        }
+      : process.env,
+    stdio: 'inherit',
+  },
+)
 
-if (dnsServerValue) {
-  const dns = await import('node:dns')
-  const servers = dnsServerValue
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
+process.on('SIGINT', () => {
+  child.kill('SIGINT')
+})
 
-  if (servers.length > 0) {
-    dns.setServers(servers)
-    console.info(`[agent-dispatch] dns servers set: ${servers.join(', ')}`)
-  }
-}
+process.on('SIGTERM', () => {
+  child.kill('SIGTERM')
+})
 
-await import('wrangler/bin/wrangler.js')
+child.on('exit', (code) => {
+  process.exit(code ?? 0)
+})
