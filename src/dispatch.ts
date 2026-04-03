@@ -175,11 +175,74 @@ function createTimedResponseBody(
   })
 }
 
-function createClientResponse(response: Response, timeoutMs: number): Response {
+function rewriteRedirectLocation(location: string, upstreamUrl: URL): string {
+  let redirectUrl: URL
+
+  try {
+    redirectUrl = new URL(location, upstreamUrl)
+  } catch {
+    return location
+  }
+
+  if (redirectUrl.protocol !== 'http:' && redirectUrl.protocol !== 'https:') {
+    return location
+  }
+
+  const authority = encodeURIComponent(redirectUrl.host)
+  const prefix = redirectUrl.protocol === 'https:' ? '/ssl' : ''
+
+  return `${prefix}/${authority}${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`
+}
+
+function rewriteRefreshHeader(refresh: string, upstreamUrl: URL): string {
+  const match = refresh.match(/^(\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*)(.*?)(\s*)$/i)
+
+  if (!match) {
+    return refresh
+  }
+
+  const prefix = match[1] ?? ''
+  const rawTarget = match[2] ?? ''
+  const suffix = match[3] ?? ''
+  let target: string = rawTarget
+  let quote = ''
+
+  if (
+    (target.startsWith('"') && target.endsWith('"')) ||
+    (target.startsWith("'") && target.endsWith("'"))
+  ) {
+    quote = target[0] ?? ''
+    target = target.slice(1, -1)
+  }
+
+  return `${prefix}${quote}${rewriteRedirectLocation(target, upstreamUrl)}${quote}${suffix}`
+}
+
+function createClientResponseHeaders(response: Response, upstreamUrl: URL): Headers {
+  const headers = cloneResponseHeaders(response)
+  const location = headers.get('location')
+  const refresh = headers.get('refresh')
+
+  if (location) {
+    headers.set('location', rewriteRedirectLocation(location, upstreamUrl))
+  }
+
+  if (refresh) {
+    headers.set('refresh', rewriteRefreshHeader(refresh, upstreamUrl))
+  }
+
+  return headers
+}
+
+function createClientResponse(
+  response: Response,
+  timeoutMs: number,
+  upstreamUrl: URL,
+): Response {
   return new Response(createTimedResponseBody(response, timeoutMs), {
     status: response.status,
     statusText: response.statusText,
-    headers: cloneResponseHeaders(response),
+    headers: createClientResponseHeaders(response, upstreamUrl),
   })
 }
 
@@ -237,7 +300,7 @@ async function fetchRelayResponse(
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
-      const delay = RELAY_RETRY_DELAYS_MS[attempt - 1]
+      const delay = RELAY_RETRY_DELAYS_MS[attempt - 1] ?? 0
       if (delay > 0) {
         await new Promise(resolve => setTimeout(resolve, delay))
       }
@@ -434,7 +497,7 @@ export async function handleDispatchRequest(
         return new Response(clientBody, {
           status: relayResponse.status,
           statusText: relayResponse.statusText,
-          headers: cloneResponseHeaders(relayResponse),
+          headers: createClientResponseHeaders(relayResponse, ingress.upstreamUrl),
         })
       }
 
@@ -450,7 +513,11 @@ export async function handleDispatchRequest(
       }
     }
 
-    return createClientResponse(relayResponse, config.relayResponseTimeoutMs)
+    return createClientResponse(
+      relayResponse,
+      config.relayResponseTimeoutMs,
+      ingress.upstreamUrl,
+    )
   } catch (error) {
     if (error instanceof DispatchError) {
       return error.toResponse()

@@ -322,6 +322,96 @@ describe('handleDispatchRequest', () => {
     expect(await response.text()).toBe('data: first\n\ndata: second\n\n')
   })
 
+  it('preserves 301 while rewriting an absolute https Location through agent-dispatch', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: 'https://login.example.com/oauth/start?client_id=abc',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(response.headers.get('location')).toBe(
+      '/ssl/login.example.com/oauth/start?client_id=abc',
+    )
+  })
+
+  it('preserves 301 while rewriting a relative Location through agent-dispatch', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: '../login?next=%2Fhome',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/account/profile'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(response.headers.get('location')).toBe(
+      '/ssl/api.openai.com/login?next=%2Fhome',
+    )
+  })
+
+  it('rewrites the url target inside a Refresh header through agent-dispatch', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 200,
+          headers: {
+            Refresh: '0; url=https://login.example.com/oauth/start?client_id=abc',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('refresh')).toBe(
+      '0; url=/ssl/login.example.com/oauth/start?client_id=abc',
+    )
+  })
+
+  it('preserves a Refresh header without url unchanged', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 200,
+          headers: {
+            Refresh: '5',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('refresh')).toBe('5')
+  })
+
   it('does not switch to another proxy when the selected node fails', async () => {
     const state = createDispatchState()
     const fetchSpy = vi.fn(async (_request: Request) => {
@@ -420,7 +510,15 @@ describe('handleDispatchRequest', () => {
     expect(response.status).toBe(200)
     expect(capturedUrl).toContain('1.2.3.4')
 
-    const relayRequest = fetchSpy.mock.calls[0][0] as Request
+    const firstCall = fetchSpy.mock.calls.at(0)
+
+    expect(firstCall).toBeDefined()
+
+    if (!firstCall) {
+      throw new Error('expected DNS-resolved relay call to exist')
+    }
+
+    const [relayRequest] = firstCall as [Request]
     expect(relayRequest.headers.get('host')).toBe('proxy-a.internal')
   })
 

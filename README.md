@@ -166,6 +166,8 @@ agent-dispatch 会尽量保留以下内容：
 **响应侧**
 - 状态码、`Set-Cookie`、响应头
 - 流式响应 body（含 SSE）
+- `3xx` 响应会保留原始状态码；若包含 `http/https` 类型的 `Location`，会被重写为继续走 agent-dispatch 的入口路径
+- `Refresh` 响应头若包含 `url=...`，会仅重写其中的跳转目标；纯刷新秒数会原样透传
 
 hop-by-hop 头部（`Connection`、`Transfer-Encoding`、`Host`、`Content-Length`）不会继续转发，以维持标准代理语义。
 
