@@ -6,10 +6,12 @@ import { resolveIngressRequest } from './routing'
 import {
   collectIgnoredAuthLikeHeaders,
   createDispatchState,
+  recordChallengeAffinity,
   selectAgentproxy,
   type DispatchSelection,
   type DispatchState,
   type RelayStats,
+  type StickyIdentifier,
 } from './strategy'
 
 export type { DispatchEnv } from './config'
@@ -139,6 +141,106 @@ function hasChallengeSetCookie(headers: Headers): boolean {
   return getSetCookieHeaderValues(headers).some(value => CHALLENGE_SET_COOKIE_PATTERN.test(value))
 }
 
+function parseCookieHeader(cookieHeader: string | null): Array<{ name: string; value: string }> {
+  if (!cookieHeader) {
+    return []
+  }
+
+  return cookieHeader
+    .split(';')
+    .map(segment => segment.trim())
+    .filter(Boolean)
+    .flatMap((segment) => {
+      const separatorIndex = segment.indexOf('=')
+
+      if (separatorIndex <= 0) {
+        return []
+      }
+
+      const name = segment.slice(0, separatorIndex).trim()
+      const value = segment.slice(separatorIndex + 1).trim()
+
+      if (!name || !value) {
+        return []
+      }
+
+      return [{ name, value }]
+    })
+}
+
+function resolveChallengeStickyIdentifier(headers: Headers): StickyIdentifier | undefined {
+  const challengeCookieMatches = new Map<string, StickyIdentifier>()
+
+  for (const cookie of parseCookieHeader(headers.get('cookie'))) {
+    const normalizedName = cookie.name.toLowerCase()
+
+    if (
+      !challengeCookieMatches.has(normalizedName) &&
+      (normalizedName === 'acw_tc' ||
+        normalizedName === 'cdn_sec_tc' ||
+        normalizedName === 'acw_sc__v2')
+    ) {
+      challengeCookieMatches.set(normalizedName, {
+        source: `cookie-${normalizedName}`,
+        hashValue: cookie.value,
+      })
+    }
+  }
+
+  return (
+    challengeCookieMatches.get('acw_tc') ??
+    challengeCookieMatches.get('cdn_sec_tc') ??
+    challengeCookieMatches.get('acw_sc__v2')
+  )
+}
+
+function getChallengeResponseStickyIdentifiers(
+  requestHeaders: Headers,
+  responseHeaders: Headers,
+): StickyIdentifier[] {
+  const identifiers = new Map<string, StickyIdentifier>()
+  const requestIdentifier = resolveChallengeStickyIdentifier(requestHeaders)
+
+  if (requestIdentifier) {
+    identifiers.set(requestIdentifier.source, requestIdentifier)
+  }
+
+  for (const value of getSetCookieHeaderValues(responseHeaders)) {
+    const separatorIndex = value.indexOf('=')
+
+    if (separatorIndex <= 0) {
+      continue
+    }
+
+    const rawName = value.slice(0, separatorIndex).trim()
+    const normalizedName = rawName.toLowerCase()
+
+    if (
+      normalizedName !== 'acw_tc' &&
+      normalizedName !== 'cdn_sec_tc' &&
+      normalizedName !== 'acw_sc__v2'
+    ) {
+      continue
+    }
+
+    const cookieValue = value
+      .slice(separatorIndex + 1)
+      .split(';', 1)[0]
+      ?.trim()
+
+    if (!cookieValue) {
+      continue
+    }
+
+    identifiers.set(`cookie-${normalizedName}`, {
+      source: `cookie-${normalizedName}`,
+      hashValue: cookieValue,
+    })
+  }
+
+  return [...identifiers.values()]
+}
+
 function isChallengeResponse(response: Response): boolean {
   return response.headers.has('x-tengine-error') || hasChallengeSetCookie(response.headers)
 }
@@ -257,7 +359,26 @@ function createTimedResponseBody(
   })
 }
 
-function rewriteRedirectLocation(location: string, upstreamUrl: URL): string {
+function buildDispatchPathFromUrl(targetUrl: URL): string {
+  const authority = encodeURIComponent(targetUrl.host)
+  const prefix = targetUrl.protocol === 'https:' ? '/ssl' : ''
+
+  return `${prefix}/${authority}${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`
+}
+
+function isAlreadyDispatchedPath(location: string): boolean {
+  return /^\/(?:ssl\/)?[^/?#]+(?:[/?#]|$)/.test(location)
+}
+
+function toCurrentDomainUrl(path: string, currentDomain: string): string {
+  return `http://${currentDomain}${path}`
+}
+
+function rewriteRedirectLocation(location: string, upstreamUrl: URL, currentDomain: string): string {
+  if (isAlreadyDispatchedPath(location)) {
+    return currentDomain ? toCurrentDomainUrl(location, currentDomain) : location
+  }
+
   let redirectUrl: URL
 
   try {
@@ -270,13 +391,12 @@ function rewriteRedirectLocation(location: string, upstreamUrl: URL): string {
     return location
   }
 
-  const authority = encodeURIComponent(redirectUrl.host)
-  const prefix = redirectUrl.protocol === 'https:' ? '/ssl' : ''
+  const rewrittenPath = buildDispatchPathFromUrl(redirectUrl)
 
-  return `${prefix}/${authority}${redirectUrl.pathname}${redirectUrl.search}${redirectUrl.hash}`
+  return currentDomain ? toCurrentDomainUrl(rewrittenPath, currentDomain) : rewrittenPath
 }
 
-function rewriteRefreshHeader(refresh: string, upstreamUrl: URL): string {
+function rewriteRefreshHeader(refresh: string, upstreamUrl: URL, currentDomain: string): string {
   const match = refresh.match(/^(\s*\d+(?:\.\d+)?\s*;\s*url\s*=\s*)(.*?)(\s*)$/i)
 
   if (!match) {
@@ -297,20 +417,24 @@ function rewriteRefreshHeader(refresh: string, upstreamUrl: URL): string {
     target = target.slice(1, -1)
   }
 
-  return `${prefix}${quote}${rewriteRedirectLocation(target, upstreamUrl)}${quote}${suffix}`
+  return `${prefix}${quote}${rewriteRedirectLocation(target, upstreamUrl, currentDomain)}${quote}${suffix}`
 }
 
-function createClientResponseHeaders(response: Response, upstreamUrl: URL): Headers {
+function createClientResponseHeaders(
+  response: Response,
+  upstreamUrl: URL,
+  currentDomain: string,
+): Headers {
   const headers = cloneResponseHeaders(response)
   const location = headers.get('location')
   const refresh = headers.get('refresh')
 
   if (location) {
-    headers.set('location', rewriteRedirectLocation(location, upstreamUrl))
+    headers.set('location', rewriteRedirectLocation(location, upstreamUrl, currentDomain))
   }
 
   if (refresh) {
-    headers.set('refresh', rewriteRefreshHeader(refresh, upstreamUrl))
+    headers.set('refresh', rewriteRefreshHeader(refresh, upstreamUrl, currentDomain))
   }
 
   return headers
@@ -320,11 +444,12 @@ function createClientResponse(
   response: Response,
   timeoutMs: number,
   upstreamUrl: URL,
+  currentDomain: string,
 ): Response {
   return new Response(createTimedResponseBody(response, timeoutMs), {
     status: response.status,
     statusText: response.statusText,
-    headers: createClientResponseHeaders(response, upstreamUrl),
+    headers: createClientResponseHeaders(response, upstreamUrl, currentDomain),
   })
 }
 
@@ -725,6 +850,25 @@ export async function handleDispatchRequest(
     const challengeResponse = isChallengeResponse(relayResponse)
 
     // 负向缓存：记录上游响应
+    if (challengeResponse) {
+      const challengeStickyIdentifiers = getChallengeResponseStickyIdentifiers(
+        request.headers,
+        relayResponse.headers,
+      )
+
+      for (const stickyIdentifier of challengeStickyIdentifiers) {
+        recordChallengeAffinity(ingress.authority, stickyIdentifier, proxyIndex, state)
+      }
+
+      if (challengeStickyIdentifiers.length > 0) {
+        console.info('[agent-dispatch] challenge affinity recorded', {
+          targetAuthority: ingress.authority,
+          proxyIndex,
+          sources: challengeStickyIdentifiers.map(({ source }) => source),
+        })
+      }
+    }
+
     if (cacheKey) {
       if (negativeCache.isCacheableResponse(relayResponse.status, accountBound) && !challengeResponse) {
         // 可缓存状态码：tee 流，一份缓存一份返回客户端
@@ -762,7 +906,7 @@ export async function handleDispatchRequest(
           new Response(clientBody, {
             status: relayResponse.status,
             statusText: relayResponse.statusText,
-            headers: createClientResponseHeaders(relayResponse, ingress.upstreamUrl),
+            headers: createClientResponseHeaders(relayResponse, ingress.upstreamUrl, config.currentDomain),
           }),
           startedAtMs,
           requestInfo,
@@ -792,6 +936,7 @@ export async function handleDispatchRequest(
         relayResponse,
         config.relayResponseTimeoutMs,
         ingress.upstreamUrl,
+        config.currentDomain,
       ),
       startedAtMs,
       requestInfo,

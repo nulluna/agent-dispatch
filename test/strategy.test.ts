@@ -16,7 +16,6 @@ describe('selectAgentproxyIndex', () => {
 
       expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
       expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
-      expect(selectAgentproxyIndex('poll', 3, 'two.cc', createHeaders(), state)).toBe(1)
 
       vi.advanceTimersByTime(7_900)
       expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
@@ -25,7 +24,23 @@ describe('selectAgentproxyIndex', () => {
       expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(0)
 
       vi.advanceTimersByTime(8_100)
-      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(2)
+      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reuses the same poll proxy for a site while its affinity is still valid', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-03T00:00:00.000Z'))
+
+    try {
+      const state = createDispatchState()
+      const first = selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)
+
+      vi.advanceTimersByTime(1_000)
+
+      expect(selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)).toBe(first)
     } finally {
       vi.useRealTimers()
     }
@@ -170,6 +185,162 @@ describe('selectAgentproxyIndex', () => {
         state,
       ),
     )
+  })
+
+  it('keeps hash routing stable for the same challenge cookie when auth and session are absent', () => {
+    const state = createDispatchState()
+
+    const challengeA = selectAgentproxyIndex(
+      'hash',
+      64,
+      'anyrouter.top',
+      createHeaders({
+        Cookie: 'acw_tc=challenge-123; theme=dark',
+      }),
+      state,
+    )
+    const challengeB = selectAgentproxyIndex(
+      'hash',
+      64,
+      'anyrouter.top',
+      createHeaders({
+        Cookie: 'acw_tc=challenge-123; locale=zh-CN',
+      }),
+      state,
+    )
+    const challengeIndexes = new Set(
+      ['challenge-123', 'challenge-456', 'challenge-789', 'challenge-abc', 'challenge-def', 'challenge-ghi'].map(
+        (challenge) =>
+          selectAgentproxyIndex(
+            'hash',
+            64,
+            'anyrouter.top',
+            createHeaders({
+              Cookie: `acw_tc=${challenge}; theme=dark`,
+            }),
+            state,
+          ),
+      ),
+    )
+
+    expect(challengeA).toBe(challengeB)
+    expect(challengeIndexes.size).toBeGreaterThan(1)
+  })
+
+  it('keeps hash routing stable for the same fallback challenge cookie when auth and session are absent', () => {
+    const state = createDispatchState()
+
+    const challengeA = selectAgentproxyIndex(
+      'hash',
+      64,
+      'anyrouter.top',
+      createHeaders({
+        Cookie: 'cdn_sec_tc=challenge-456; theme=dark',
+      }),
+      state,
+    )
+    const challengeB = selectAgentproxyIndex(
+      'hash',
+      64,
+      'anyrouter.top',
+      createHeaders({
+        Cookie: 'cdn_sec_tc=challenge-456; locale=zh-CN',
+      }),
+      state,
+    )
+    const challengeIndexes = new Set(
+      ['challenge-123', 'challenge-456', 'challenge-789', 'challenge-abc', 'challenge-def', 'challenge-ghi'].map(
+        (challenge) =>
+          selectAgentproxyIndex(
+            'hash',
+            64,
+            'anyrouter.top',
+            createHeaders({
+              Cookie: `cdn_sec_tc=${challenge}; theme=dark`,
+            }),
+            state,
+          ),
+      ),
+    )
+
+    expect(challengeA).toBe(challengeB)
+    expect(challengeIndexes.size).toBeGreaterThan(1)
+  })
+
+  it('prefers challenge affinity over active poll site cache for poll routing', () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-04-03T00:00:00.000Z'))
+
+    try {
+      const state = createDispatchState()
+      const siteCachedIndex = selectAgentproxyIndex('poll', 3, 'any.top', createHeaders(), state)
+      const challengeIndex = selectAgentproxyIndex(
+        'hash',
+        3,
+        'any.top',
+        createHeaders({
+          Cookie: 'acw_tc=challenge-123; theme=dark',
+        }),
+        state,
+      )
+
+      expect(challengeIndex).not.toBe(siteCachedIndex)
+      expect(
+        selectAgentproxyIndex(
+          'poll',
+          3,
+          'any.top',
+          createHeaders({
+            Cookie: 'acw_tc=challenge-123; locale=zh-CN',
+          }),
+          state,
+        ),
+      ).toBe(challengeIndex)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('prefers session cookies over challenge cookies for hash routing', () => {
+    const state = createDispatchState()
+
+    expect(
+      selectAgentproxyIndex(
+        'hash',
+        64,
+        'anyrouter.top',
+        createHeaders({
+          Cookie: 'session=session-123; acw_tc=challenge-123; cdn_sec_tc=challenge-other',
+        }),
+        state,
+      ),
+    ).toBe(
+      selectAgentproxyIndex(
+        'hash',
+        64,
+        'anyrouter.top',
+        createHeaders({
+          Cookie: 'session=session-123; acw_tc=challenge-changed; cdn_sec_tc=challenge-next',
+        }),
+        state,
+      ),
+    )
+
+    expect(
+      new Set(
+        ['session-123', 'session-456', 'session-789', 'session-abc', 'session-def', 'session-ghi'].map((session) =>
+          selectAgentproxyIndex(
+            'hash',
+            64,
+            'anyrouter.top',
+            createHeaders({
+              Cookie: `session=${session}; acw_tc=challenge-fixed; cdn_sec_tc=challenge-fixed-next`,
+            }),
+            state,
+          ),
+        ),
+      ).size,
+    ).toBeGreaterThan(1)
   })
 
   it('keeps the same site fallback index for one hour and rotates after expiration', () => {

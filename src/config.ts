@@ -11,6 +11,7 @@ export interface DispatchEnv {
   DISPATCH_INGRESS_KEY?: string
   DISPATCH_INGRESS_HEADER?: string
   DNS_RESOLVE?: string
+  CURRENT_DOMAIN?: string
 }
 
 export type DispatchStrategy = 'poll' | 'hash'
@@ -27,6 +28,7 @@ export interface RuntimeConfig {
   ingressKey: string
   ingressHeader: string
   dnsResolve: Map<string, string>
+  currentDomain: string
 }
 
 function parsePositiveInteger(value: string | undefined, fallback: number): number {
@@ -156,5 +158,6 @@ export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
     ingressKey: env.DISPATCH_INGRESS_KEY?.trim() ?? '',
     ingressHeader: env.DISPATCH_INGRESS_HEADER?.trim().toLowerCase() || 'x-dispatch-token',
     dnsResolve: parseDnsResolve(env.DNS_RESOLVE),
+    currentDomain: env.CURRENT_DOMAIN?.trim() ?? '',
   }
 }

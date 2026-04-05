@@ -38,6 +38,20 @@ function readSetCookies(headers: Headers): string[] {
   return singleValue ? [singleValue] : []
 }
 
+function readRelayBackend(call: unknown[] | undefined): string {
+  if (!call) {
+    throw new Error('expected relay call to exist')
+  }
+
+  const [request] = call as [Request]
+
+  if (!(request instanceof Request)) {
+    throw new Error('expected relay request to be a Request instance')
+  }
+
+  return `${new URL(request.url).origin}/`
+}
+
 describe('handleDispatchRequest', () => {
   it('rewrites an HTTPS ingress path to the internal relay URL', async () => {
     const fetchSpy = vi.fn(async (request: Request) => {
@@ -107,6 +121,122 @@ describe('handleDispatchRequest', () => {
 
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('slash-ok')
+  })
+
+  it('reuses the challenge backend for hash token requests with the same challenge cookie', async () => {
+    const state = createDispatchState()
+    const fetchSpy = vi.fn(async () => {
+      if (fetchSpy.mock.calls.length === 1) {
+        const headers = new Headers({
+          'content-type': 'application/json',
+        })
+        headers.append('set-cookie', 'acw_tc=challenge-x; Path=/; HttpOnly')
+        headers.append('set-cookie', 'cdn_sec_tc=challenge-x; Path=/; HttpOnly')
+
+        return new Response('challenge unauthorized', {
+          status: 401,
+          headers,
+        })
+      }
+
+      return new Response('token-ok', { status: 200 })
+    })
+
+    const env = createEnv({
+      AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+      DISPATCH_STRATEGY: 'hash',
+    })
+
+    const challengeResponse = await handleDispatchRequest(
+      createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100'),
+      env,
+      fetchSpy,
+      state,
+    )
+    const challengeBackend = readRelayBackend(fetchSpy.mock.calls.at(0))
+
+    expect(challengeResponse.status).toBe(401)
+    expect(readSetCookies(challengeResponse.headers)).toEqual([
+      'acw_tc=challenge-x; Path=/; HttpOnly',
+      'cdn_sec_tc=challenge-x; Path=/; HttpOnly',
+    ])
+
+    const tokenResponse = await handleDispatchRequest(
+      createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100', {
+        headers: {
+          Cookie: 'acw_tc=challenge-x; cdn_sec_tc=challenge-x',
+        },
+      }),
+      env,
+      fetchSpy,
+      state,
+    )
+    const tokenBackend = readRelayBackend(fetchSpy.mock.calls.at(1))
+
+    expect(tokenResponse.status).toBe(200)
+    expect(challengeBackend).toBe(tokenBackend)
+  })
+
+  it('reuses the challenge backend for poll token requests even after the site poll cache expires', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const state = createDispatchState()
+      const fetchSpy = vi.fn(async () => {
+        if (fetchSpy.mock.calls.length === 1) {
+          const headers = new Headers({
+            'content-type': 'application/json',
+          })
+          headers.append('set-cookie', 'acw_tc=challenge-x; Path=/; HttpOnly')
+          headers.append('set-cookie', 'cdn_sec_tc=challenge-x; Path=/; HttpOnly')
+
+          return new Response('challenge unauthorized', {
+            status: 401,
+            headers,
+          })
+        }
+
+        return new Response('token-ok', { status: 200 })
+      })
+
+      const env = createEnv({
+        AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+        DISPATCH_STRATEGY: 'poll',
+      })
+
+      const challengeResponse = await handleDispatchRequest(
+        createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100'),
+        env,
+        fetchSpy,
+        state,
+      )
+      const challengeBackend = readRelayBackend(fetchSpy.mock.calls.at(0))
+
+      expect(challengeResponse.status).toBe(401)
+      expect(readSetCookies(challengeResponse.headers)).toEqual([
+        'acw_tc=challenge-x; Path=/; HttpOnly',
+        'cdn_sec_tc=challenge-x; Path=/; HttpOnly',
+      ])
+
+      vi.advanceTimersByTime(8_001)
+
+      const tokenResponse = await handleDispatchRequest(
+        createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100', {
+          headers: {
+            Cookie: 'acw_tc=challenge-x; cdn_sec_tc=challenge-x',
+          },
+        }),
+        env,
+        fetchSpy,
+        state,
+      )
+      const tokenBackend = readRelayBackend(fetchSpy.mock.calls.at(1))
+
+      expect(tokenResponse.status).toBe(200)
+      expect(challengeBackend).toBe(tokenBackend)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('logs the selected dispatch strategy and backend at info level', async () => {
@@ -415,7 +545,7 @@ describe('handleDispatchRequest', () => {
     expect(await response.text()).toBe('data: first\n\ndata: second\n\n')
   })
 
-  it('preserves 301 while rewriting an absolute https Location through agent-dispatch', async () => {
+  it('rewrites an absolute https Location through CURRENT_DOMAIN', async () => {
     const fetchSpy = vi.fn(
       async () =>
         new Response(null, {
@@ -428,17 +558,90 @@ describe('handleDispatchRequest', () => {
 
     const response = await handleDispatchRequest(
       createRequest('/ssl/api.openai.com/v1/responses'),
-      createEnv(),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
 
     expect(response.status).toBe(301)
     expect(response.headers.get('location')).toBe(
-      '/ssl/login.example.com/oauth/start?client_id=abc',
+      'http://dispatch.example.com/ssl/login.example.com/oauth/start?client_id=abc',
     )
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('preserves 301 while rewriting a relative Location through agent-dispatch', async () => {
+  it('rewrites an absolute http Location through CURRENT_DOMAIN without /ssl', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: 'http://legacy.example.com/signin?from=dispatch',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/account/profile'),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(response.headers.get('location')).toBe(
+      'http://dispatch.example.com/legacy.example.com/signin?from=dispatch',
+    )
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('rewrites a relative Location through CURRENT_DOMAIN using the current upstream site', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: '../login?next=%2Fhome',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/account/profile'),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(response.headers.get('location')).toBe(
+      'http://dispatch.example.com/ssl/api.openai.com/login?next=%2Fhome',
+    )
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('rewrites the url target inside a Refresh header through CURRENT_DOMAIN', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 200,
+          headers: {
+            Refresh: '0; url="https://login.example.com/oauth/start?client_id=abc"',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(response.headers.get('refresh')).toBe(
+      '0; url="http://dispatch.example.com/ssl/login.example.com/oauth/start?client_id=abc"',
+    )
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps relative dispatch rewriting when CURRENT_DOMAIN is not configured', async () => {
     const fetchSpy = vi.fn(
       async () =>
         new Response(null, {
@@ -459,18 +662,78 @@ describe('handleDispatchRequest', () => {
     expect(response.headers.get('location')).toBe(
       '/ssl/api.openai.com/login?next=%2Fhome',
     )
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('rewrites the url target inside a Refresh header through agent-dispatch', async () => {
+  it('keeps non-http Location values unchanged', async () => {
     const fetchSpy = vi.fn(
       async () =>
         new Response(null, {
-          status: 200,
+          status: 301,
           headers: {
-            Refresh: '0; url=https://login.example.com/oauth/start?client_id=abc',
+            Location: 'mailto:support@example.com',
           },
         }),
     )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/account/profile'),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(response.headers.get('location')).toBe('mailto:support@example.com')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not double-wrap an already dispatched https Location', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: '/ssl/login.example.com/oauth/start?client_id=abc',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(response.headers.get('location')).toBe(
+      'http://dispatch.example.com/ssl/login.example.com/oauth/start?client_id=abc',
+    )
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('preserves 301 status without following redirects server-side', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: 'https://login.example.com/oauth/start?client_id=abc',
+          },
+        }),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends a single relay request for a normal 200 response', async () => {
+    const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
 
     const response = await handleDispatchRequest(
       createRequest('/ssl/api.openai.com/v1/responses'),
@@ -479,9 +742,97 @@ describe('handleDispatchRequest', () => {
     )
 
     expect(response.status).toBe(200)
-    expect(response.headers.get('refresh')).toBe(
-      '0; url=/ssl/login.example.com/oauth/start?client_id=abc',
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends a single relay request for a 301 response', async () => {
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(null, {
+          status: 301,
+          headers: {
+            Location: 'https://login.example.com/oauth/start?client_id=abc',
+          },
+        }),
     )
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(301)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('returns a cached negative response without contacting relay again', async () => {
+    const state = createDispatchState()
+    const fetchSpy = vi.fn(async () => new Response('not found', { status: 404 }))
+    const env = createEnv({
+      DISPATCH_STRATEGY: 'hash',
+      DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
+      AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+    })
+
+    const first = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/models', {
+        headers: { Authorization: 'Bearer abc' },
+      }),
+      env,
+      fetchSpy,
+      state,
+    )
+    const second = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/models', {
+        headers: { Authorization: 'Bearer abc' },
+      }),
+      env,
+      fetchSpy,
+      state,
+    )
+
+    expect(first.status).toBe(404)
+    expect(second.status).toBe(404)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('sends a probe request after a cached negative response expires', async () => {
+    vi.useFakeTimers()
+
+    try {
+      const state = createDispatchState()
+      const fetchSpy = vi.fn(async () => new Response('not found', { status: 404 }))
+      const env = createEnv({
+        DISPATCH_STRATEGY: 'hash',
+        DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
+        AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
+      })
+
+      await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/models', {
+          headers: { Authorization: 'Bearer abc' },
+        }),
+        env,
+        fetchSpy,
+        state,
+      )
+
+      vi.advanceTimersByTime(60 * 60 * 1000 + 1)
+
+      await handleDispatchRequest(
+        createRequest('/ssl/api.openai.com/v1/models', {
+          headers: { Authorization: 'Bearer abc' },
+        }),
+        env,
+        fetchSpy,
+        state,
+      )
+
+      expect(fetchSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('logs a readable info line for 301 responses with rewritten location', async () => {

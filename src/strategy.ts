@@ -3,6 +3,7 @@ import { NegativeResponseCache } from './negative-cache'
 
 const SITE_FALLBACK_TTL_MS = 60 * 60 * 1000
 const POLL_SITE_TTL_MS = 8 * 1000
+const CHALLENGE_AFFINITY_TTL_MS = 10 * 60 * 1000
 
 export interface RelayStats {
   timeoutFailures: number
@@ -13,6 +14,7 @@ export interface DispatchState {
   nextPollIndex: number
   pollSiteSelections: Map<string, SitePollSelectionState>
   siteFallbackSelections: Map<string, SiteFallbackSelectionState>
+  challengeAffinities: Map<string, ChallengeAffinityState>
   negativeCache: NegativeResponseCache
   relayStats: RelayStats
 }
@@ -25,6 +27,16 @@ interface SitePollSelectionState {
 interface SiteFallbackSelectionState {
   index: number
   expiresAt: number
+}
+
+interface ChallengeAffinityState {
+  index: number
+  expiresAt: number
+}
+
+export interface StickyIdentifier {
+  source: string
+  hashValue: string
 }
 
 export interface PollDispatchSelection {
@@ -64,6 +76,7 @@ export function createDispatchState(): DispatchState {
     nextPollIndex: 0,
     pollSiteSelections: new Map(),
     siteFallbackSelections: new Map(),
+    challengeAffinities: new Map(),
     negativeCache: new NegativeResponseCache(),
     relayStats: { timeoutFailures: 0, retrySuccesses: 0 },
   }
@@ -109,7 +122,8 @@ function parseCookieHeader(cookieHeader: string | null): Array<{ name: string; v
 
 function resolveStickyCookie(headers: Headers): { source: string; value: string } | undefined {
   const cookies = parseCookieHeader(headers.get('cookie'))
-  let fuzzyMatch: { source: string; value: string } | undefined
+  let fuzzySessionMatch: { source: string; value: string } | undefined
+  const challengeCookieMatches = new Map<string, { source: string; value: string }>()
 
   for (const cookie of cookies) {
     const normalizedName = cookie.name.toLowerCase()
@@ -121,15 +135,32 @@ function resolveStickyCookie(headers: Headers): { source: string; value: string 
       }
     }
 
-    if (!fuzzyMatch && normalizedName.includes('session')) {
-      fuzzyMatch = {
+    if (!fuzzySessionMatch && normalizedName.includes('session')) {
+      fuzzySessionMatch = {
         source: 'cookie-fuzzy-session',
         value: cookie.value,
       }
     }
+
+    if (
+      !challengeCookieMatches.has(normalizedName) &&
+      (normalizedName === 'acw_tc' ||
+        normalizedName === 'cdn_sec_tc' ||
+        normalizedName === 'acw_sc__v2')
+    ) {
+      challengeCookieMatches.set(normalizedName, {
+        source: `cookie-${normalizedName}`,
+        value: cookie.value,
+      })
+    }
   }
 
-  return fuzzyMatch
+  return (
+    fuzzySessionMatch ??
+    challengeCookieMatches.get('acw_tc') ??
+    challengeCookieMatches.get('cdn_sec_tc') ??
+    challengeCookieMatches.get('acw_sc__v2')
+  )
 }
 
 const preferredStickyHeaderNames = [
@@ -160,7 +191,9 @@ function resolveStickyHeader(headers: Headers): { source: string; value: string 
   return undefined
 }
 
-export function resolveStickyIdentifier(headers: Headers): { source: string; hashValue: string } | undefined {
+const challengeStickySources = new Set(['cookie-acw_tc', 'cookie-cdn_sec_tc', 'cookie-acw_sc__v2'])
+
+export function resolveStickyIdentifier(headers: Headers): StickyIdentifier | undefined {
   const headerMatch = resolveStickyHeader(headers)
 
   if (headerMatch) {
@@ -180,6 +213,69 @@ export function resolveStickyIdentifier(headers: Headers): { source: string; has
   }
 
   return undefined
+}
+
+export function isChallengeStickyIdentifier(stickyIdentifier: StickyIdentifier | undefined): boolean {
+  return stickyIdentifier !== undefined && challengeStickySources.has(stickyIdentifier.source)
+}
+
+function getChallengeAffinityKey(
+  targetSite: string,
+  stickyIdentifier: StickyIdentifier | undefined,
+): string | undefined {
+  if (stickyIdentifier === undefined || !isChallengeStickyIdentifier(stickyIdentifier)) {
+    return undefined
+  }
+
+  return `${targetSite}\n${stickyIdentifier.source}\n${stickyIdentifier.hashValue}`
+}
+
+export function lookupChallengeAffinity(
+  poolLength: number,
+  targetSite: string,
+  stickyIdentifier: StickyIdentifier | undefined,
+  state: DispatchState,
+): number | undefined {
+  const affinityKey = getChallengeAffinityKey(targetSite, stickyIdentifier)
+
+  if (!affinityKey) {
+    return undefined
+  }
+
+  const now = Date.now()
+  const cachedAffinity = state.challengeAffinities.get(affinityKey)
+
+  if (!cachedAffinity) {
+    return undefined
+  }
+
+  if (now >= cachedAffinity.expiresAt) {
+    state.challengeAffinities.delete(affinityKey)
+    return undefined
+  }
+
+  const normalizedIndex = cachedAffinity.index % poolLength
+  cachedAffinity.index = normalizedIndex
+  cachedAffinity.expiresAt = now + CHALLENGE_AFFINITY_TTL_MS
+  return normalizedIndex
+}
+
+export function recordChallengeAffinity(
+  targetSite: string,
+  stickyIdentifier: StickyIdentifier | undefined,
+  proxyIndex: number,
+  state: DispatchState,
+): void {
+  const affinityKey = getChallengeAffinityKey(targetSite, stickyIdentifier)
+
+  if (!affinityKey) {
+    return
+  }
+
+  state.challengeAffinities.set(affinityKey, {
+    index: proxyIndex,
+    expiresAt: Date.now() + CHALLENGE_AFFINITY_TTL_MS,
+  })
 }
 
 export function collectIgnoredAuthLikeHeaders(headers: Headers): Record<string, string> {
@@ -283,8 +379,25 @@ function selectSitePoll(
   poolLength: number,
   targetSite: string,
   state: DispatchState,
+  challengeAffinityIndex?: number,
 ): PollDispatchSelection {
   const now = Date.now()
+
+  if (challengeAffinityIndex !== undefined) {
+    const normalizedIndex = challengeAffinityIndex % poolLength
+
+    state.pollSiteSelections.set(targetSite, {
+      index: normalizedIndex,
+      expiresAt: now + POLL_SITE_TTL_MS,
+    })
+
+    return {
+      strategy: 'poll',
+      poolLength,
+      proxyIndex: normalizedIndex,
+    }
+  }
+
   const cachedSelection = state.pollSiteSelections.get(targetSite)
 
   if (cachedSelection && now < cachedSelection.expiresAt) {
@@ -325,11 +438,36 @@ export function selectAgentproxy(
     throw new RangeError('poolLength 必须大于 0')
   }
 
+  const stickyIdentifier = resolveStickyIdentifier(headers)
+  const challengeAffinityIndex = lookupChallengeAffinity(
+    poolLength,
+    targetSite,
+    stickyIdentifier,
+    state,
+  )
+
   if (strategy === 'poll') {
-    return selectSitePoll(poolLength, targetSite, state)
+    const selection = selectSitePoll(poolLength, targetSite, state, challengeAffinityIndex)
+    recordChallengeAffinity(targetSite, stickyIdentifier, selection.proxyIndex, state)
+    return selection
   }
 
-  const stickyIdentifier = resolveStickyIdentifier(headers)
+  if (challengeAffinityIndex !== undefined) {
+    const hashValue = hashString(`${targetSite}\n${stickyIdentifier?.hashValue ?? challengeAffinityIndex}`)
+
+    return {
+      strategy,
+      selectionMode: 'sticky-hash',
+      poolLength,
+      proxyIndex: challengeAffinityIndex,
+      selectedIndex: challengeAffinityIndex,
+      stickySource: stickyIdentifier?.source ?? 'site-fallback',
+      accountHash: hashString(stickyIdentifier?.hashValue ?? String(challengeAffinityIndex))
+        .toString(16)
+        .padStart(8, '0'),
+      hashValue,
+    }
+  }
 
   if (!stickyIdentifier) {
     return selectSiteFallback(poolLength, targetSite, state)
@@ -338,6 +476,8 @@ export function selectAgentproxy(
   const hashInput = `${targetSite}\n${stickyIdentifier.hashValue}`
   const hashValue = hashString(hashInput)
   const selectedIndex = hashValue % poolLength
+
+  recordChallengeAffinity(targetSite, stickyIdentifier, selectedIndex, state)
 
   return {
     strategy,
