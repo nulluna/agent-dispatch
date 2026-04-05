@@ -90,6 +90,25 @@ describe('handleDispatchRequest', () => {
     expect(await response.text()).toBe('http-ok')
   })
 
+  it('preserves a trailing slash when relaying ingress paths', async () => {
+    const fetchSpy = vi.fn(async (request: Request) => {
+      expect(request.url).toBe(
+        'https://proxy-a.internal/relay/relay-secret/proxyssl/anyrouter.top/api/token/?p=0&size=100',
+      )
+
+      return new Response('slash-ok', { status: 200 })
+    })
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('slash-ok')
+  })
+
   it('logs the selected dispatch strategy and backend at info level', async () => {
     const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
     const fetchSpy = vi.fn(async () => new Response('logged-ok', { status: 200 }))
@@ -1143,6 +1162,39 @@ describe('handleDispatchRequest', () => {
     } finally {
       infoSpy.mockRestore()
       vi.useRealTimers()
+    }
+  })
+
+  it('does not cache a site-fallback 401 response without an account-bound identifier', async () => {
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => undefined)
+    const state = createDispatchState()
+    let callCount = 0
+
+    const fetchSpy = vi.fn(async () => {
+      callCount++
+      return new Response('unauthorized', { status: 401 })
+    })
+
+    const env = createEnv({
+      DISPATCH_STRATEGY: 'hash',
+      AGENTPROXY_POOL: 'https://proxy-a.internal',
+      DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
+    })
+
+    const makeRequest = () => createRequest('/ssl/anyrouter.top/api/user/self')
+
+    try {
+      const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response1.status).toBe(401)
+      expect(await response1.text()).toBe('unauthorized')
+      expect(callCount).toBe(1)
+
+      const response2 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
+      expect(response2.status).toBe(401)
+      expect(await response2.text()).toBe('unauthorized')
+      expect(callCount).toBe(2)
+    } finally {
+      infoSpy.mockRestore()
     }
   })
 

@@ -33,6 +33,18 @@ export class NegativeResponseCache {
     this.cacheableStatuses = cacheableStatuses ?? DEFAULT_CACHEABLE_STATUSES
   }
 
+  isCacheableResponse(status: number, accountBound: boolean): boolean {
+    if (!this.cacheableStatuses.has(status)) {
+      return false
+    }
+
+    if (accountBound) {
+      return true
+    }
+
+    return status !== 401 && status !== 403
+  }
+
   buildCacheKey(
     accountId: string,
     method: string,
@@ -93,7 +105,7 @@ export class NegativeResponseCache {
   ): void {
     const existing = this.entries.get(key)
 
-    if (!this.cacheableStatuses.has(status)) {
+    if (!this.isCacheableResponse(status, accountBound)) {
       if (existing) {
         this.removeEntry(key, existing)
       }

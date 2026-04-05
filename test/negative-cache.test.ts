@@ -61,6 +61,20 @@ describe('NegativeResponseCache', () => {
     })
   })
 
+  describe('isCacheableResponse', () => {
+    it.each([401, 403, 404, 405, 410, 429])('accountBound=true 时状态码 %d 可缓存', (status) => {
+      expect(cache.isCacheableResponse(status, true)).toBe(true)
+    })
+
+    it.each([401, 403])('accountBound=false 时状态码 %d 不可缓存', (status) => {
+      expect(cache.isCacheableResponse(status, false)).toBe(false)
+    })
+
+    it.each([404, 405, 410, 429])('accountBound=false 时状态码 %d 仍可缓存', (status) => {
+      expect(cache.isCacheableResponse(status, false)).toBe(true)
+    })
+  })
+
   describe('基础缓存：recordResponse + lookup', () => {
     it.each([401, 403, 404, 405, 410, 429])('缓存 %d 响应并命中', (status) => {
       const key = 'acc:GET:/path'
@@ -252,7 +266,7 @@ describe('NegativeResponseCache', () => {
   describe('固定 TTL（accountBound = false）', () => {
     it('TTL 始终 30s', () => {
       const key = 'site:GET:/path'
-      cache.recordResponse(key, 401, createResponseHeaders(), new ArrayBuffer(0), false)
+      cache.recordResponse(key, 404, createResponseHeaders(), new ArrayBuffer(0), false)
       expect(cache.lookup(key)!.currentTtlMs).toBe(FALLBACK_TTL_MS)
     })
 
@@ -261,16 +275,26 @@ describe('NegativeResponseCache', () => {
 
       try {
         const key = 'site:GET:/path'
-        cache.recordResponse(key, 401, createResponseHeaders(), new ArrayBuffer(0), false)
+        cache.recordResponse(key, 404, createResponseHeaders(), new ArrayBuffer(0), false)
 
         vi.advanceTimersByTime(FALLBACK_TTL_MS + 1)
         cache.lookup(key) // 放行探测
-        cache.recordResponse(key, 401, createResponseHeaders(), new ArrayBuffer(0), false)
+        cache.recordResponse(key, 404, createResponseHeaders(), new ArrayBuffer(0), false)
 
         expect(cache.lookup(key)!.currentTtlMs).toBe(FALLBACK_TTL_MS)
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    it('不缓存 site-fallback 的 401/403', () => {
+      const key = 'site:GET:/path'
+
+      cache.recordResponse(key, 401, createResponseHeaders(), new ArrayBuffer(0), false)
+      expect(cache.lookup(key)).toBeNull()
+
+      cache.recordResponse(key, 403, createResponseHeaders(), new ArrayBuffer(0), false)
+      expect(cache.lookup(key)).toBeNull()
     })
   })
 

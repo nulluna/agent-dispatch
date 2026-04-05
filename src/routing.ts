@@ -50,6 +50,7 @@ function validateAuthority(authority: string, protocol: UpstreamProtocol): URL {
 
 export function resolveIngressRequest(requestUrl: URL): ResolvedIngress {
   const segments = requestUrl.pathname.split('/').filter(Boolean)
+  const hasTrailingSlash = requestUrl.pathname.length > 1 && requestUrl.pathname.endsWith('/')
 
   if (segments.length === 0) {
     throw new DispatchError(400, 'MISSING_AUTHORITY', '缺少上游 authority')
@@ -66,9 +67,14 @@ export function resolveIngressRequest(requestUrl: URL): ResolvedIngress {
   const authority = decodeAuthority(authoritySegment)
   const upstreamUrl = validateAuthority(authority, protocol)
   const pathStartIndex = useHttps ? 2 : 1
+  const pathSegments = segments.slice(pathStartIndex)
 
-  upstreamUrl.pathname =
-    segments.length > pathStartIndex ? `/${segments.slice(pathStartIndex).join('/')}` : '/'
+  if (pathSegments.length === 0) {
+    upstreamUrl.pathname = '/'
+  } else {
+    upstreamUrl.pathname = `/${pathSegments.join('/')}${hasTrailingSlash ? '/' : ''}`
+  }
+
   upstreamUrl.search = requestUrl.search
 
   return {

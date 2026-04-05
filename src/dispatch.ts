@@ -726,7 +726,7 @@ export async function handleDispatchRequest(
 
     // 负向缓存：记录上游响应
     if (cacheKey) {
-      if (negativeCache.isCacheableStatus(relayResponse.status) && !challengeResponse) {
+      if (negativeCache.isCacheableResponse(relayResponse.status, accountBound) && !challengeResponse) {
         // 可缓存状态码：tee 流，一份缓存一份返回客户端
         const responseBody = relayResponse.body
         let cacheBody: ArrayBuffer
