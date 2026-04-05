@@ -4,6 +4,7 @@ dist/
 .wrangler-dist/
 .spec-workflow/
 .zcf/
+.worktrees/
 coverage/
 docs/
 tmp/
