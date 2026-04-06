@@ -80,6 +80,8 @@ cp .env.example .env
 npm run dev
 ```
 
+当前 `dev` 脚本会通过 `tsx --env-file=.env` 自动加载 `.env`。
+
 构建：
 
 ```bash
