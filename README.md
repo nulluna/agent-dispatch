@@ -68,11 +68,15 @@
 npm install
 ```
 
-开发模式：
+复制示例配置：
 
 ```bash
-DISPATCH_SECRET=relay-secret \
-AGENT_PROXY_URLS=http://127.0.0.1:9001,http://127.0.0.1:9002 \
+cp .env.example .env
+```
+
+按需修改 `.env` 后启动开发模式：
+
+```bash
 npm run dev
 ```
 
