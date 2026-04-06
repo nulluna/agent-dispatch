@@ -20,7 +20,6 @@ export interface RuntimeConfig {
   backendSelectionStrategy: BackendSelectionStrategy
 }
 
-const DEFAULT_PORT: number | null = 8787
 const DEFAULT_REQUEST_TIMEOUT_MS = 5000
 const DEFAULT_FAILOVER_COOLDOWN_MS = 3000
 const DEFAULT_BACKEND_SELECTION_STRATEGY: BackendSelectionStrategy = 'consistent-hashing'
@@ -30,26 +29,6 @@ function parsePositiveInteger(
   fieldName: string,
   defaultValue: number,
 ): number {
-  const trimmed = value?.trim()
-
-  if (!trimmed) {
-    return defaultValue
-  }
-
-  const parsed = Number.parseInt(trimmed, 10)
-
-  if (!Number.isFinite(parsed) || parsed <= 0) {
-    throw new Error(`${fieldName} 必须是正整数`)
-  }
-
-  return parsed
-}
-
-function parseOptionalPositiveIntegerWithDefault(
-  value: string | undefined,
-  fieldName: string,
-  defaultValue: number | null,
-): number | null {
   const trimmed = value?.trim()
 
   if (!trimmed) {
@@ -150,7 +129,7 @@ export function loadEnvFromProcess(processEnv: NodeJS.ProcessEnv): DispatchEnv {
 }
 
 export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
-  const port = parseOptionalPositiveIntegerWithDefault(env.PORT, 'PORT', DEFAULT_PORT)
+  const port = parseOptionalPositiveInteger(env.PORT, 'PORT')
   const transparentPort = parseOptionalPositiveInteger(env.TRANSPARENT_PORT, 'TRANSPARENT_PORT')
 
   if (port === null && transparentPort === null) {
