@@ -31,6 +31,82 @@ function logDispatch(stage: string, payload: Record<string, unknown>): void {
   console.info(`[agent-dispatch] ${stage}`, JSON.stringify(payload))
 }
 
+function summarizeRequestHeaders(request: Request): Record<string, string | boolean | number | string[] | null> {
+  const cookieHeader = request.headers.get('cookie')
+  const cookieNames = cookieHeader
+    ? cookieHeader
+        .split(';')
+        .map((part) => part.trim().split('=')[0])
+        .filter(Boolean)
+    : []
+
+  return {
+    host: request.headers.get('host'),
+    accept: request.headers.get('accept'),
+    origin: request.headers.get('origin'),
+    referer: request.headers.get('referer'),
+    'user-agent': request.headers.get('user-agent'),
+    'sec-fetch-site': request.headers.get('sec-fetch-site'),
+    'sec-fetch-mode': request.headers.get('sec-fetch-mode'),
+    'sec-fetch-dest': request.headers.get('sec-fetch-dest'),
+    cookie_present: request.headers.has('cookie'),
+    cookie_count: cookieNames.length,
+    cookie_names: cookieNames,
+    authorization_present: request.headers.has('authorization'),
+  }
+}
+
+function summarizeSetCookieHeaders(headers: Headers): { set_cookie_count: number; set_cookie_names: string[] } {
+  const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie
+  const values = typeof getSetCookie === 'function'
+    ? getSetCookie.call(headers)
+    : (headers.get('set-cookie') ? [headers.get('set-cookie')!] : [])
+
+  const names = values
+    .map((value) => value.split(';')[0]?.split('=')[0]?.trim())
+    .filter((value): value is string => Boolean(value))
+
+  return {
+    set_cookie_count: names.length,
+    set_cookie_names: names,
+  }
+}
+
+function summarizeResponseHeaders(headers: Headers): Record<string, unknown> {
+  return {
+    'content-type': headers.get('content-type'),
+    'content-encoding': headers.get('content-encoding'),
+    location: headers.get('location'),
+    ...summarizeSetCookieHeaders(headers),
+  }
+}
+
+function logResponseSummary(stage: string, response: Response): void {
+  console.info(`[agent-dispatch] ${stage}`, JSON.stringify({
+    status: response.status,
+    headers: summarizeResponseHeaders(response.headers),
+  }))
+}
+
+function isApiLikePath(pathname: string): boolean {
+  return pathname.startsWith('/api/') || pathname.startsWith('/v1/')
+}
+
+function logApiHtmlMismatch(requestUrl: URL, response: Response): void {
+  const contentType = response.headers.get('content-type') ?? ''
+
+  if (!isApiLikePath(requestUrl.pathname) || !contentType.startsWith('text/html')) {
+    return
+  }
+
+  console.warn('[agent-dispatch] api-html-mismatch', JSON.stringify({
+    requestUrl: requestUrl.toString(),
+    status: response.status,
+    contentType,
+    ...summarizeSetCookieHeaders(response.headers),
+  }))
+}
+
 function resolveTransparentTargetHost(request: Request, requestUrl: URL): string {
   const directTargetHost = request.headers.get('x-dispatch-target-host')?.trim()
 
@@ -67,6 +143,7 @@ async function handleRequest(
         ? resolveTransparentTargetHost(request, requestUrl)
         : undefined,
     hasBody: request.body !== null,
+    requestHeaders: summarizeRequestHeaders(request),
   })
 
   if (requestUrl.pathname === '/healthz' || requestUrl.pathname === '/readyz') {
@@ -82,7 +159,10 @@ async function handleRequest(
   }
 
   try {
-    return await dispatchRequest(request, route, config, options.fetchImplementation)
+    const response = await dispatchRequest(request, route, config, options.fetchImplementation)
+    logResponseSummary('request-response-summary', response)
+    logApiHtmlMismatch(requestUrl, response)
+    return response
   } catch (error) {
     if (error instanceof DispatchError) {
       return error.toResponse()
