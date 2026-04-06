@@ -2,6 +2,7 @@ export type BackendSelectionStrategy = 'round-robin' | 'consistent-hashing'
 
 export interface DispatchEnv {
   PORT?: string
+  TRANSPARENT_PORT?: string
   DISPATCH_SECRET?: string
   AGENT_PROXY_URLS?: string
   REQUEST_TIMEOUT_MS?: string
@@ -10,7 +11,8 @@ export interface DispatchEnv {
 }
 
 export interface RuntimeConfig {
-  port: number
+  port: number | null
+  transparentPort: number | null
   dispatchSecret: string
   proxyUrls: URL[]
   requestTimeoutMs: number
@@ -18,7 +20,7 @@ export interface RuntimeConfig {
   backendSelectionStrategy: BackendSelectionStrategy
 }
 
-const DEFAULT_PORT = 8787
+const DEFAULT_PORT: number | null = 8787
 const DEFAULT_REQUEST_TIMEOUT_MS = 5000
 const DEFAULT_FAILOVER_COOLDOWN_MS = 3000
 const DEFAULT_BACKEND_SELECTION_STRATEGY: BackendSelectionStrategy = 'consistent-hashing'
@@ -32,6 +34,45 @@ function parsePositiveInteger(
 
   if (!trimmed) {
     return defaultValue
+  }
+
+  const parsed = Number.parseInt(trimmed, 10)
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${fieldName} 必须是正整数`)
+  }
+
+  return parsed
+}
+
+function parseOptionalPositiveIntegerWithDefault(
+  value: string | undefined,
+  fieldName: string,
+  defaultValue: number | null,
+): number | null {
+  const trimmed = value?.trim()
+
+  if (!trimmed) {
+    return defaultValue
+  }
+
+  const parsed = Number.parseInt(trimmed, 10)
+
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${fieldName} 必须是正整数`)
+  }
+
+  return parsed
+}
+
+function parseOptionalPositiveInteger(
+  value: string | undefined,
+  fieldName: string,
+): number | null {
+  const trimmed = value?.trim()
+
+  if (!trimmed) {
+    return null
   }
 
   const parsed = Number.parseInt(trimmed, 10)
@@ -99,6 +140,7 @@ function parseProxyUrls(value?: string): URL[] {
 export function loadEnvFromProcess(processEnv: NodeJS.ProcessEnv): DispatchEnv {
   return {
     PORT: processEnv.PORT,
+    TRANSPARENT_PORT: processEnv.TRANSPARENT_PORT,
     DISPATCH_SECRET: processEnv.DISPATCH_SECRET,
     AGENT_PROXY_URLS: processEnv.AGENT_PROXY_URLS,
     REQUEST_TIMEOUT_MS: processEnv.REQUEST_TIMEOUT_MS,
@@ -108,8 +150,16 @@ export function loadEnvFromProcess(processEnv: NodeJS.ProcessEnv): DispatchEnv {
 }
 
 export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
+  const port = parseOptionalPositiveIntegerWithDefault(env.PORT, 'PORT', DEFAULT_PORT)
+  const transparentPort = parseOptionalPositiveInteger(env.TRANSPARENT_PORT, 'TRANSPARENT_PORT')
+
+  if (port === null && transparentPort === null) {
+    throw new Error('PORT 和 TRANSPARENT_PORT 不能同时为空')
+  }
+
   return {
-    port: parsePositiveInteger(env.PORT, 'PORT', DEFAULT_PORT),
+    port,
+    transparentPort,
     dispatchSecret: parseDispatchSecret(env.DISPATCH_SECRET),
     proxyUrls: parseProxyUrls(env.AGENT_PROXY_URLS),
     requestTimeoutMs: parsePositiveInteger(

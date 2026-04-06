@@ -1,0 +1,16 @@
+# Example: TLS terminates at Caddy, transparent traffic is forwarded to TRANSPARENT_PORT.
+# Assumes mkcert or another trusted local certificate setup is already in place.
+
+https://anyrouter.top {
+  tls /path/to/anyrouter.top.pem /path/to/anyrouter.top-key.pem
+
+  reverse_proxy 127.0.0.1:8788 {
+    header_up X-Dispatch-Target-Host {host}
+    header_up X-Forwarded-Proto https
+  }
+}
+
+# Optional explicit proxy entry
+http://127.0.0.1 {
+  reverse_proxy 127.0.0.1:8787
+}

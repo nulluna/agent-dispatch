@@ -6,6 +6,7 @@ import type { ProxyRoute } from '../src/routing.js'
 
 const route: ProxyRoute = {
   kind: 'proxy',
+  routingMode: 'explicit',
   protocolCode: 's',
   protocol: 'https',
   targetHost: 'example.com:8443',
@@ -16,6 +17,7 @@ const route: ProxyRoute = {
 function createConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
   return {
     port: 8787,
+    transparentPort: null,
     dispatchSecret: 'relay-secret',
     proxyUrls: [new URL('https://proxy-a.example/base'), new URL('https://proxy-b.example')],
     requestTimeoutMs: 50,
@@ -104,6 +106,7 @@ describe('dispatch', () => {
       new Request('https://dispatch.local/h/another.example.com/status'),
       {
         kind: 'proxy',
+        routingMode: 'explicit',
         protocolCode: 'h',
         protocol: 'http',
         targetHost: 'another.example.com',

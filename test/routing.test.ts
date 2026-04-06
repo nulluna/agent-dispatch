@@ -11,6 +11,7 @@ describe('routing', () => {
 
     expect(route).toEqual({
       kind: 'proxy',
+      routingMode: 'explicit',
       protocolCode: 's',
       protocol: 'https',
       targetHost: 'example.com:8443',

@@ -2,10 +2,12 @@ import { DispatchError } from './errors.js'
 
 export type ProtocolCode = 's' | 'h'
 export type UpstreamProtocol = 'http' | 'https'
+export type RoutingMode = 'explicit' | 'transparent'
 export type InvalidRouteReason = 'missing_protocol_code'
 
 export interface ProxyRoute {
   kind: 'proxy'
+  routingMode: RoutingMode
   protocolCode: ProtocolCode
   protocol: UpstreamProtocol
   targetHost: string
@@ -113,10 +115,28 @@ export function parseDispatchRoute(requestUrl: URL): DispatchRoute {
 
   return {
     kind: 'proxy',
+    routingMode: 'explicit',
     protocolCode,
     protocol: mapProtocol(protocolCode),
     targetHost,
     targetPathname,
+    targetSearch: requestUrl.search,
+  }
+}
+
+export function createTransparentRoute(
+  requestUrl: URL,
+  targetHostValue: string,
+): ProxyRoute {
+  const targetHost = validateHost(targetHostValue)
+
+  return {
+    kind: 'proxy',
+    routingMode: 'transparent',
+    protocolCode: 's',
+    protocol: 'https',
+    targetHost,
+    targetPathname: requestUrl.pathname || '/',
     targetSearch: requestUrl.search,
   }
 }

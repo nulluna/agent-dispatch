@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 
 import { getRuntimeConfig, loadEnvFromProcess, type DispatchEnv } from './config.js'
 import { createApp, type AppOptions } from './index.js'
+import type { RoutingMode } from './routing.js'
 import { jsonErrorResponse } from './errors.js'
 
 function toHeaders(headers: IncomingHttpHeaders): HeadersInit {
@@ -151,8 +152,8 @@ async function writeResponse(response: Response, res: http.ServerResponse): Prom
   })
 }
 
-export function createServer(options: AppOptions = {}): Server {
-  const app = createApp(options)
+export function createServer(mode: RoutingMode = 'explicit', options: AppOptions = {}): Server {
+  const app = createApp({ ...options, mode })
 
   return http.createServer(async (req, res) => {
     try {
@@ -170,28 +171,57 @@ export function createServer(options: AppOptions = {}): Server {
   })
 }
 
-export async function startServer(env: DispatchEnv = loadEnvFromProcess(process.env)): Promise<Server> {
+export async function startServers(
+  env: DispatchEnv = loadEnvFromProcess(process.env),
+): Promise<{ explicitServer: Server | null; transparentServer: Server | null }> {
   const config = getRuntimeConfig(env)
-  const server = createServer({ config })
+  let explicitServer: Server | null = null
 
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject)
-    server.listen(config.port, () => {
-      server.off('error', reject)
-      resolve()
+  if (config.port !== null) {
+    explicitServer = createServer('explicit', { config })
+
+    await new Promise<void>((resolve, reject) => {
+      explicitServer!.once('error', reject)
+      explicitServer!.listen(config.port!, () => {
+        explicitServer!.off('error', reject)
+        resolve()
+      })
     })
-  })
+  }
 
-  return server
+  let transparentServer: Server | null = null
+
+  if (config.transparentPort !== null) {
+    transparentServer = createServer('transparent', { config })
+
+    await new Promise<void>((resolve, reject) => {
+      transparentServer!.once('error', reject)
+      transparentServer!.listen(config.transparentPort!, () => {
+        transparentServer!.off('error', reject)
+        resolve()
+      })
+    })
+  }
+
+  return { explicitServer, transparentServer }
 }
 
 const currentFile = fileURLToPath(import.meta.url)
 
 if (process.argv[1] && currentFile === process.argv[1]) {
   const config = getRuntimeConfig(loadEnvFromProcess(process.env))
-  const server = createServer({ config })
 
-  server.listen(config.port, () => {
-    process.stdout.write(`agent-dispatch listening on ${config.port}\n`)
-  })
+  if (config.port !== null) {
+    const explicitServer = createServer('explicit', { config })
+    explicitServer.listen(config.port, () => {
+      process.stdout.write(`agent-dispatch explicit listening on ${config.port}\n`)
+    })
+  }
+
+  if (config.transparentPort !== null) {
+    const transparentServer = createServer('transparent', { config })
+    transparentServer.listen(config.transparentPort, () => {
+      process.stdout.write(`agent-dispatch transparent listening on ${config.transparentPort}\n`)
+    })
+  }
 }

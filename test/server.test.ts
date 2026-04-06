@@ -4,6 +4,7 @@ import { gzipSync } from 'node:zlib'
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { createServer } from '../src/server.js'
+import { createTransparentRoute } from '../src/routing.js'
 
 type ProxyEnv = {
   ROUTE_BASE_PATH?: string
@@ -128,9 +129,10 @@ function createProxyEnv(): ProxyEnv {
 
 describe('server', () => {
   it('returns health check response', async () => {
-    const dispatchServer = createServer({
+    const dispatchServer = createServer('explicit', {
       config: {
         port: 0,
+        transparentPort: null,
         dispatchSecret: 'relay-secret',
         proxyUrls: [new URL('http://127.0.0.1:1')],
         requestTimeoutMs: 1000,
@@ -227,9 +229,10 @@ describe('server', () => {
 
     const proxyPort = await listen(proxyServer)
 
-    const dispatchServer = createServer({
+    const dispatchServer = createServer('explicit', {
       config: {
         port: 0,
+        transparentPort: null,
         dispatchSecret: 'relay-secret',
         proxyUrls: [new URL(`http://127.0.0.1:${proxyPort}`)],
         requestTimeoutMs: 1000,
@@ -295,5 +298,47 @@ describe('server', () => {
     expect(encodedResponse.status).toBe(200)
     expect(encodedResponse.headers.get('content-encoding')).toBeNull()
     expect(await encodedResponse.text()).toBe('<html>plain body</html>')
+
+    const transparentServer = createServer('transparent', {
+      config: {
+        port: 0,
+        transparentPort: 0,
+        dispatchSecret: 'relay-secret',
+        proxyUrls: [new URL(`http://127.0.0.1:${proxyPort}`)],
+        requestTimeoutMs: 1000,
+        failoverCooldownMs: 1000,
+        backendSelectionStrategy: 'consistent-hashing',
+      },
+    })
+
+    const transparentPort = await listen(transparentServer)
+
+    const transparentRedirect = await fetch(
+      `http://127.0.0.1:${transparentPort}/redirect`,
+      {
+        headers: {
+          'x-dispatch-target-host': `upstream.test:${upstreamPort}`,
+        },
+        redirect: 'manual',
+      },
+    )
+
+    expect(transparentRedirect.status).toBe(302)
+    expect(transparentRedirect.headers.get('location')).toBe('/done?ok=1')
+
+    const transparentApi = await fetch(
+      `http://127.0.0.1:${transparentPort}/api/user/self`,
+      {
+        headers: {
+          'x-dispatch-target-host': `upstream.test:${upstreamPort}`,
+        },
+      },
+    )
+
+    expect(transparentApi.status).toBe(200)
+    await expect(transparentApi.json()).resolves.toEqual({
+      ok: true,
+      path: '/api/user/self',
+    })
   })
 })

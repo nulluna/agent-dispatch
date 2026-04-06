@@ -6,12 +6,13 @@ import {
 } from './config.js'
 import { dispatchRequest, type FetchImplementation } from './dispatch.js'
 import { DispatchError, jsonErrorResponse } from './errors.js'
-import { parseDispatchRoute } from './routing.js'
+import { createTransparentRoute, parseDispatchRoute, type RoutingMode } from './routing.js'
 
 export interface AppOptions {
   env?: DispatchEnv
   config?: RuntimeConfig
   fetchImplementation?: FetchImplementation
+  mode?: RoutingMode
 }
 
 export interface App {
@@ -30,16 +31,41 @@ function logDispatch(stage: string, payload: Record<string, unknown>): void {
   console.info(`[agent-dispatch] ${stage}`, JSON.stringify(payload))
 }
 
+function resolveTransparentTargetHost(request: Request, requestUrl: URL): string {
+  const directTargetHost = request.headers.get('x-dispatch-target-host')?.trim()
+
+  if (directTargetHost) {
+    return directTargetHost
+  }
+
+  const forwardedHost = request.headers
+    .get('x-forwarded-host')
+    ?.split(',')[0]
+    ?.trim()
+
+  if (forwardedHost) {
+    return forwardedHost
+  }
+
+  return requestUrl.host
+}
+
 async function handleRequest(
   request: Request,
   config: RuntimeConfig,
   options: AppOptions,
 ): Promise<Response> {
+  const mode = options.mode ?? 'explicit'
   const requestUrl = new URL(request.url)
 
   logDispatch('request-received', {
+    mode,
     method: request.method,
     url: requestUrl.toString(),
+    targetHost:
+      mode === 'transparent'
+        ? resolveTransparentTargetHost(request, requestUrl)
+        : undefined,
     hasBody: request.body !== null,
   })
 
@@ -47,7 +73,9 @@ async function handleRequest(
     return createHealthResponse()
   }
 
-  const route = parseDispatchRoute(requestUrl)
+  const route = mode === 'transparent'
+    ? createTransparentRoute(requestUrl, resolveTransparentTargetHost(request, requestUrl))
+    : parseDispatchRoute(requestUrl)
 
   if (route.kind === 'invalid') {
     return createRouteNotFoundResponse()

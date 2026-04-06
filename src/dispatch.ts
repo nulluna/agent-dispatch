@@ -406,7 +406,10 @@ function createClientResponse(
 
   logDispatchResponseHeaders('relay-upstream-response', response.headers)
 
-  const headers = rewriteResponseHeaders(cloneResponseHeaders(response), upstreamUrl, dispatchUrl)
+  const headers =
+    route.routingMode === 'transparent'
+      ? cloneResponseHeaders(response)
+      : rewriteResponseHeaders(cloneResponseHeaders(response), upstreamUrl, dispatchUrl)
   const clientResponse = new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
