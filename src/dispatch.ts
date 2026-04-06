@@ -2,6 +2,7 @@ import { type Dispatcher } from 'undici'
 
 import type { RuntimeConfig } from './config.js'
 import { DispatchError } from './errors.js'
+import { type LogWriter } from './logging.js'
 import type { ProxyRoute } from './routing.js'
 import { buildUpstreamUrlFromRoute, rewriteResponseHeaders } from './rewrite.js'
 import {
@@ -54,6 +55,7 @@ export async function dispatchRequest(
   route: ProxyRoute,
   config: RuntimeConfig,
   fetchImplementation: FetchImplementation = fetch,
+  logWriter?: LogWriter,
 ): Promise<Response> {
   const dispatcher = createProxyDispatcher(config.socks5Proxy)
   const cleanupDispatcher = createDispatcherCleanup(dispatcher)
@@ -68,6 +70,7 @@ export async function dispatchRequest(
       signal: request.signal,
       dispatcher,
       fetchImplementation: createProxyFetchAdapter(fetchImplementation),
+      logWriter,
     })
 
     return createRelayResponse({

@@ -55,7 +55,13 @@ async function handleRequest(
   }
 
   try {
-    return await dispatchRequest(request, route, config, options.fetchImplementation)
+    return await dispatchRequest(
+      request,
+      route,
+      config,
+      options.fetchImplementation,
+      options.logWriter,
+    )
   } catch (error) {
     if (error instanceof DispatchError) {
       return error.toResponse()

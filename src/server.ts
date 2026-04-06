@@ -5,6 +5,9 @@ import { fileURLToPath } from 'node:url'
 
 import { getRuntimeConfig, loadEnvFromProcess, type DispatchEnv } from './config.js'
 import { createApp, type AppOptions } from './index.js'
+import { writeJsonLog, type LogWriter } from './logging.js'
+
+const RESPONSE_WRITE_TIMEOUT_MS = 30_000
 
 function toHeaders(headers: http.IncomingHttpHeaders): HeadersInit {
   const normalized: Array<[string, string]> = []
@@ -59,17 +62,148 @@ async function readRequestBody(
 async function writeResponseBody(
   response: Response,
   res: http.ServerResponse,
+  logWriter?: LogWriter,
 ): Promise<void> {
-  if (!response.body) {
-    res.end()
-    return
+  const startAt = Date.now()
+  let settled = false
+  let sawFirstChunk = false
+  let responseFinished = false
+  let responseErrored = false
+  let requestAborted = false
+
+  const logWriteBack = (event: string, extra: Record<string, unknown> = {}) => {
+    writeJsonLog(
+      {
+        event,
+        status: response.status,
+        headersSent: res.headersSent,
+        writableEnded: res.writableEnded,
+        writableFinished: res.writableFinished,
+        durationMs: Date.now() - startAt,
+        ...extra,
+      },
+      logWriter,
+    )
   }
 
-  const nodeStream = Readable.fromWeb(response.body as NodeReadableStream)
   await new Promise<void>((resolve, reject) => {
-    nodeStream.on('error', reject)
-    res.on('error', reject)
-    res.on('finish', resolve)
+    const finish = (error?: Error) => {
+      if (settled) {
+        return
+      }
+
+      settled = true
+      clearTimeout(timeout)
+      res.off('finish', handleFinish)
+      res.off('close', handleClose)
+      res.off('error', handleError)
+      res.req?.off('aborted', handleAborted)
+      nodeStream?.off('data', handleFirstChunk)
+      nodeStream?.off('error', handleStreamError)
+      nodeStream?.off('end', handleStreamEnd)
+      nodeStream?.off('close', handleStreamClose)
+
+      if (error) {
+        reject(error)
+        return
+      }
+
+      resolve()
+    }
+
+    const handleFinish = () => {
+      responseFinished = true
+      logWriteBack('dispatch.write_back_finish')
+      finish()
+    }
+
+    const handleClose = () => {
+      logWriteBack('dispatch.write_back_close', {
+        responseFinished,
+        requestAborted,
+        responseErrored,
+      })
+
+      if (responseFinished || requestAborted || responseErrored) {
+        return
+      }
+
+      finish(new Error('response closed before finish'))
+    }
+
+    const handleError = (error: Error) => {
+      responseErrored = true
+      logWriteBack('dispatch.write_back_error', {
+        error: error.message,
+      })
+      finish(error)
+    }
+
+    const handleAborted = () => {
+      requestAborted = true
+      logWriteBack('dispatch.write_back_aborted')
+      if (nodeStream && !nodeStream.destroyed) {
+        nodeStream.destroy()
+      }
+    }
+
+    const handleFirstChunk = () => {
+      if (sawFirstChunk) {
+        return
+      }
+
+      sawFirstChunk = true
+      logWriteBack('dispatch.write_back_first_chunk')
+    }
+
+    const handleStreamError = (error: Error) => {
+      logWriteBack('dispatch.write_back_stream_error', {
+        error: error.message,
+      })
+      finish(error)
+    }
+
+    const handleStreamEnd = () => {
+      logWriteBack('dispatch.write_back_stream_end')
+    }
+
+    const handleStreamClose = () => {
+      logWriteBack('dispatch.write_back_stream_close')
+    }
+
+    const timeout = setTimeout(() => {
+      logWriteBack('dispatch.write_back_timeout')
+      if (!res.writableEnded) {
+        requestAborted = true
+        res.destroy()
+        return
+      }
+
+      finish(new Error('response write timeout'))
+    }, RESPONSE_WRITE_TIMEOUT_MS)
+
+    let nodeStream: Readable | null = null
+
+    res.on('finish', handleFinish)
+    res.on('close', handleClose)
+    res.on('error', handleError)
+    res.req?.on('aborted', handleAborted)
+
+    logWriteBack('dispatch.write_back_start', {
+      hasBody: Boolean(response.body),
+    })
+    res.flushHeaders()
+
+    if (!response.body) {
+      res.end()
+      return
+    }
+
+    nodeStream = Readable.fromWeb(response.body as NodeReadableStream)
+    nodeStream.on('data', handleFirstChunk)
+    nodeStream.on('error', handleStreamError)
+    nodeStream.on('end', handleStreamEnd)
+    nodeStream.on('close', handleStreamClose)
     nodeStream.pipe(res)
   })
 }
@@ -123,7 +257,7 @@ export function createServer(options: AppOptions = {}): http.Server {
         res.statusCode = response.status
         res.statusMessage = response.statusText
         applyResponseHeaders(response, res)
-        await writeResponseBody(response, res)
+        await writeResponseBody(response, res, options.logWriter)
       } catch {
         if (!res.headersSent) {
           res.statusCode = 500
