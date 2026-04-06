@@ -1,0 +1,371 @@
+import type { RuntimeConfig } from './config.js'
+import { DispatchError } from './errors.js'
+import type { ProxyRoute } from './routing.js'
+import { buildUpstreamUrlFromRoute, rewriteResponseHeaders } from './rewrite.js'
+
+export type FetchImplementation = (request: Request) => Promise<Response>
+
+const HOP_BY_HOP_HEADERS = new Set([
+  'connection',
+  'host',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+])
+
+const RETRYABLE_NETWORK_ERROR_CODES = new Set([
+  'ECONNABORTED',
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'EHOSTUNREACH',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ENETUNREACH',
+  'UND_ERR_ABORTED',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_SOCKET',
+])
+
+let nextProxyIndex = 0
+const unhealthyUntil = new Map<string, number>()
+
+interface ReplayableRequest {
+  method: string
+  headers: Headers
+  body?: ArrayBuffer
+}
+
+interface AttemptControllerState {
+  signal: AbortSignal
+  cleanup: () => void
+  timedOut: () => boolean
+  abortedByCaller: () => boolean
+}
+
+export function resetProxyRotation(): void {
+  nextProxyIndex = 0
+  unhealthyUntil.clear()
+}
+
+function reserveStartIndex(proxyCount: number): number {
+  const index = nextProxyIndex % proxyCount
+  nextProxyIndex = (nextProxyIndex + 1) % proxyCount
+
+  return index
+}
+
+function trimTrailingSlash(pathname: string): string {
+  return pathname.endsWith('/') ? pathname.slice(0, -1) : pathname
+}
+
+function normalizeSearch(search: string): string {
+  return search ? (search.startsWith('?') ? search : `?${search}`) : ''
+}
+
+function normalizeTargetPath(pathname: string): string {
+  return pathname.startsWith('/') ? pathname : `/${pathname}`
+}
+
+function validateRelayPart(value: string, fieldName: string): void {
+  if (!value || value.includes('/')) {
+    throw new DispatchError(500, 'INVALID_RELAY_PART', `${fieldName} 无法编码到 relay path`)
+  }
+}
+
+function getSetCookieValues(headers: Headers): string[] {
+  const getSetCookie = (
+    headers as Headers & { getSetCookie?: () => string[] }
+  ).getSetCookie
+
+  if (typeof getSetCookie === 'function') {
+    return getSetCookie.call(headers)
+  }
+
+  const singleValue = headers.get('set-cookie')
+
+  return singleValue ? [singleValue] : []
+}
+
+function cloneResponseHeaders(response: Response): Headers {
+  const headers = new Headers()
+
+  for (const [name, value] of response.headers.entries()) {
+    if (name.toLowerCase() === 'set-cookie') {
+      continue
+    }
+
+    headers.append(name, value)
+  }
+
+  for (const value of getSetCookieValues(response.headers)) {
+    headers.append('set-cookie', value)
+  }
+
+  return headers
+}
+
+function filterForwardHeaders(headers: Headers): Headers {
+  const forwarded = new Headers()
+
+  for (const [name, value] of headers.entries()) {
+    if (HOP_BY_HOP_HEADERS.has(name.toLowerCase())) {
+      continue
+    }
+
+    forwarded.append(name, value)
+  }
+
+  return forwarded
+}
+
+async function readReplayableBody(request: Request): Promise<ArrayBuffer | undefined> {
+  if (request.body === null || request.method === 'GET' || request.method === 'HEAD') {
+    return undefined
+  }
+
+  const body = await request.arrayBuffer()
+
+  return body.byteLength > 0 ? body : undefined
+}
+
+async function createReplayableRequest(request: Request): Promise<ReplayableRequest> {
+  return {
+    method: request.method,
+    headers: filterForwardHeaders(request.headers),
+    body: await readReplayableBody(request),
+  }
+}
+
+function createAttemptController(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): AttemptControllerState {
+  const controller = new AbortController()
+  let timedOut = false
+  let abortedByCaller = false
+
+  const timeout = setTimeout(() => {
+    timedOut = true
+    controller.abort(new Error('request timeout'))
+  }, timeoutMs)
+
+  const handleAbort = () => {
+    abortedByCaller = true
+    controller.abort(parentSignal?.reason)
+  }
+
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      handleAbort()
+    } else {
+      parentSignal.addEventListener('abort', handleAbort, { once: true })
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup: () => {
+      clearTimeout(timeout)
+      parentSignal?.removeEventListener('abort', handleAbort)
+    },
+    timedOut: () => timedOut,
+    abortedByCaller: () => abortedByCaller,
+  }
+}
+
+function createRelayRequest(
+  relayUrl: URL,
+  request: ReplayableRequest,
+  signal: AbortSignal,
+): Request {
+  const init: RequestInit & { duplex?: 'half' } = {
+    method: request.method,
+    headers: request.headers,
+    redirect: 'manual',
+    signal,
+  }
+
+  if (request.body && request.method !== 'GET' && request.method !== 'HEAD') {
+    init.body = request.body.slice(0)
+    init.duplex = 'half'
+  }
+
+  return new Request(relayUrl, init)
+}
+
+function getErrorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') {
+    return undefined
+  }
+
+  const withCode = error as { code?: unknown }
+
+  return typeof withCode.code === 'string' ? withCode.code : undefined
+}
+
+function isAbortError(error: unknown): boolean {
+  if (!(error instanceof Error)) {
+    return false
+  }
+
+  return error.name === 'AbortError' || error.message === 'This operation was aborted'
+}
+
+function shouldFailover(error: unknown, state: AttemptControllerState): boolean {
+  if (state.abortedByCaller()) {
+    return false
+  }
+
+  if (state.timedOut()) {
+    return true
+  }
+
+  if (isAbortError(error)) {
+    return true
+  }
+
+  const code = getErrorCode(error)
+
+  return code ? RETRYABLE_NETWORK_ERROR_CODES.has(code) : false
+}
+
+function markProxyUnhealthy(proxyUrl: URL, cooldownMs: number): void {
+  unhealthyUntil.set(proxyUrl.toString(), Date.now() + cooldownMs)
+}
+
+function isProxyCoolingDown(proxyUrl: URL): boolean {
+  const until = unhealthyUntil.get(proxyUrl.toString())
+
+  if (!until) {
+    return false
+  }
+
+  if (until <= Date.now()) {
+    unhealthyUntil.delete(proxyUrl.toString())
+    return false
+  }
+
+  return true
+}
+
+function getProxyCandidates(proxyUrls: URL[]): {
+  candidates: URL[]
+  preferredCount: number
+} {
+  const healthy: URL[] = []
+  const cooling: URL[] = []
+
+  for (const proxyUrl of proxyUrls) {
+    if (isProxyCoolingDown(proxyUrl)) {
+      cooling.push(proxyUrl)
+    } else {
+      healthy.push(proxyUrl)
+    }
+  }
+
+  if (healthy.length > 0) {
+    return {
+      candidates: [...healthy, ...cooling],
+      preferredCount: healthy.length,
+    }
+  }
+
+  return {
+    candidates: [...proxyUrls],
+    preferredCount: proxyUrls.length,
+  }
+}
+
+function buildExhaustedProxyError(lastError: unknown, sawTimeout: boolean): DispatchError {
+  if (lastError instanceof DispatchError) {
+    return lastError
+  }
+
+  if (sawTimeout) {
+    return new DispatchError(504, 'UPSTREAM_TIMEOUT', '所有代理节点请求超时')
+  }
+
+  return new DispatchError(502, 'UPSTREAM_FETCH_FAILED', '所有代理节点请求失败')
+}
+
+export function buildRelayUrl(proxyBaseUrl: URL, secret: string, route: ProxyRoute): URL {
+  validateRelayPart(secret, 'dispatchSecret')
+  validateRelayPart(route.protocolCode, 'protocolCode')
+  validateRelayPart(route.targetHost, 'targetHost')
+
+  const relayUrl = new URL(proxyBaseUrl)
+  const proxyBasePath = trimTrailingSlash(relayUrl.pathname)
+  const targetPath = normalizeTargetPath(route.targetPathname)
+  const encodedHost = encodeURIComponent(route.targetHost)
+
+  relayUrl.pathname = `${proxyBasePath}/relay/${secret}/${route.protocolCode}/${encodedHost}${targetPath}`
+  relayUrl.search = normalizeSearch(route.targetSearch)
+
+  return relayUrl
+}
+
+function createClientResponse(
+  request: Request,
+  route: ProxyRoute,
+  response: Response,
+): Response {
+  const upstreamUrl = buildUpstreamUrlFromRoute(route)
+  const dispatchUrl = new URL(request.url)
+  const headers = rewriteResponseHeaders(cloneResponseHeaders(response), upstreamUrl, dispatchUrl)
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  })
+}
+
+export async function dispatchRequest(
+  request: Request,
+  route: ProxyRoute,
+  config: RuntimeConfig,
+  fetchImplementation: FetchImplementation = (relayRequest) => fetch(relayRequest),
+): Promise<Response> {
+  const replayableRequest = await createReplayableRequest(request)
+  const { candidates, preferredCount } = getProxyCandidates(config.proxyUrls)
+  const startIndex = reserveStartIndex(preferredCount)
+  let lastError: unknown
+  let sawTimeout = false
+
+  for (let attempt = 0; attempt < candidates.length; attempt += 1) {
+    const proxyUrl = candidates[(startIndex + attempt) % candidates.length]
+    const relayUrl = buildRelayUrl(proxyUrl, config.dispatchSecret, route)
+    const controllerState = createAttemptController(request.signal, config.requestTimeoutMs)
+
+    try {
+      const relayRequest = createRelayRequest(relayUrl, replayableRequest, controllerState.signal)
+      const response = await fetchImplementation(relayRequest)
+
+      return createClientResponse(request, route, response)
+    } catch (error) {
+      lastError = error
+
+      if (controllerState.timedOut()) {
+        sawTimeout = true
+      }
+
+      const shouldRetry = shouldFailover(error, controllerState)
+
+      if (!shouldRetry) {
+        throw error
+      }
+
+      markProxyUnhealthy(proxyUrl, config.failoverCooldownMs)
+    } finally {
+      controllerState.cleanup()
+    }
+  }
+
+  throw buildExhaustedProxyError(lastError, sawTimeout)
+}

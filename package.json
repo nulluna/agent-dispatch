@@ -1,0 +1,20 @@
+{
+  "name": "agent-dispatch",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Node dispatch server for multi-backend agent-proxy routing",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "start": "node dist/src/server.js"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
