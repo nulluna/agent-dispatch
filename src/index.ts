@@ -26,12 +26,22 @@ function createHealthResponse(): Response {
   return Response.json({ ok: true })
 }
 
+function logDispatch(stage: string, payload: Record<string, unknown>): void {
+  console.info(`[agent-dispatch] ${stage}`, JSON.stringify(payload))
+}
+
 async function handleRequest(
   request: Request,
   config: RuntimeConfig,
   options: AppOptions,
 ): Promise<Response> {
   const requestUrl = new URL(request.url)
+
+  logDispatch('request-received', {
+    method: request.method,
+    url: requestUrl.toString(),
+    hasBody: request.body !== null,
+  })
 
   if (requestUrl.pathname === '/healthz' || requestUrl.pathname === '/readyz') {
     return createHealthResponse()

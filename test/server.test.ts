@@ -1,4 +1,5 @@
 import http, { type Server } from 'node:http'
+import { gzipSync } from 'node:zlib'
 
 import { afterEach, describe, expect, it } from 'vitest'
 
@@ -168,6 +169,16 @@ describe('server', () => {
         return
       }
 
+      if (req.url?.startsWith('/encoded')) {
+        const body = gzipSync(Buffer.from('<html>plain body</html>', 'utf8'))
+        res.statusCode = 200
+        res.setHeader('content-type', 'text/html; charset=utf-8')
+        res.setHeader('content-encoding', 'gzip')
+        res.setHeader('content-length', String(body.byteLength))
+        res.end(body)
+        return
+      }
+
       if (req.method === 'POST' && req.url?.startsWith('/upload')) {
         const chunks: Buffer[] = []
         for await (const chunk of req) {
@@ -274,5 +285,13 @@ describe('server', () => {
       path: '/upload',
       body: 'stream-upload-body',
     })
+
+    const encodedResponse = await fetch(
+      `http://127.0.0.1:${dispatchPort}/s/${upstreamHost}/encoded`,
+    )
+
+    expect(encodedResponse.status).toBe(200)
+    expect(encodedResponse.headers.get('content-encoding')).toBeNull()
+    expect(await encodedResponse.text()).toBe('<html>plain body</html>')
   })
 })

@@ -17,6 +17,37 @@ const HOP_BY_HOP_HEADERS = new Set([
   'upgrade',
 ])
 
+const RESPONSE_HEADERS_TO_DROP = new Set([
+  'connection',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+  'content-encoding',
+  'content-length',
+])
+
+function collectDebugHeaders(headers: Headers): Record<string, string | null> {
+  return {
+    'content-type': headers.get('content-type'),
+    'content-encoding': headers.get('content-encoding'),
+    'content-length': headers.get('content-length'),
+    'transfer-encoding': headers.get('transfer-encoding'),
+    location: headers.get('location'),
+  }
+}
+
+function logDispatch(stage: string, payload: Record<string, unknown>): void {
+  console.info(`[agent-dispatch] ${stage}`, JSON.stringify(payload))
+}
+
+function logDispatchResponseHeaders(stage: string, headers: Headers): void {
+  logDispatch(stage, { headers: collectDebugHeaders(headers) })
+}
+
 const RETRYABLE_NETWORK_ERROR_CODES = new Set([
   'ECONNABORTED',
   'ECONNREFUSED',
@@ -104,7 +135,9 @@ function cloneResponseHeaders(response: Response): Headers {
   const headers = new Headers()
 
   for (const [name, value] of response.headers.entries()) {
-    if (name.toLowerCase() === 'set-cookie') {
+    const lowerName = name.toLowerCase()
+
+    if (lowerName === 'set-cookie' || RESPONSE_HEADERS_TO_DROP.has(lowerName)) {
       continue
     }
 
@@ -341,13 +374,19 @@ function createClientResponse(
 ): Response {
   const upstreamUrl = buildUpstreamUrlFromRoute(route)
   const dispatchUrl = new URL(request.url)
-  const headers = rewriteResponseHeaders(cloneResponseHeaders(response), upstreamUrl, dispatchUrl)
 
-  return new Response(response.body, {
+  logDispatchResponseHeaders('relay-upstream-response', response.headers)
+
+  const headers = rewriteResponseHeaders(cloneResponseHeaders(response), upstreamUrl, dispatchUrl)
+  const clientResponse = new Response(response.body, {
     status: response.status,
     statusText: response.statusText,
     headers,
   })
+
+  logDispatchResponseHeaders('relay-client-response', clientResponse.headers)
+
+  return clientResponse
 }
 
 export async function dispatchRequest(
@@ -362,6 +401,16 @@ export async function dispatchRequest(
     const proxyUrl = candidates[startIndex % candidates.length]
     const relayUrl = buildRelayUrl(proxyUrl, config.dispatchSecret, route)
     const controllerState = createAttemptController(request.signal, config.requestTimeoutMs)
+
+    logDispatch('relay-request', {
+      mode: 'stream',
+      method: request.method,
+      requestUrl: request.url,
+      relayUrl: relayUrl.toString(),
+      proxyUrl: proxyUrl.toString(),
+      allowFailover: false,
+      hasBody: true,
+    })
 
     try {
       const relayRequest = createRelayRequest(
@@ -389,6 +438,16 @@ export async function dispatchRequest(
   const startIndex = reserveStartIndex(preferredCount)
   let lastError: unknown
   let sawTimeout = false
+
+  logDispatch('relay-request', {
+    mode: 'replayable',
+    method: request.method,
+    requestUrl: request.url,
+    candidateCount: candidates.length,
+    preferredCount,
+    allowFailover: true,
+    hasBody: false,
+  })
 
   for (let attempt = 0; attempt < candidates.length; attempt += 1) {
     const proxyUrl = candidates[(startIndex + attempt) % candidates.length]

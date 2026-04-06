@@ -77,7 +77,25 @@ async function toRequest(request: http.IncomingMessage): Promise<Request> {
   return new Request(url, init)
 }
 
+function collectDebugHeaders(headers: Headers): Record<string, string | null> {
+  return {
+    'content-type': headers.get('content-type'),
+    'content-encoding': headers.get('content-encoding'),
+    'content-length': headers.get('content-length'),
+    'transfer-encoding': headers.get('transfer-encoding'),
+    location: headers.get('location'),
+  }
+}
+
 async function writeResponse(response: Response, res: http.ServerResponse): Promise<void> {
+  console.info(
+    '[agent-dispatch] write-response',
+    JSON.stringify({
+      status: response.status,
+      headers: collectDebugHeaders(response.headers),
+    }),
+  )
+
   res.statusCode = response.status
 
   if (response.statusText) {

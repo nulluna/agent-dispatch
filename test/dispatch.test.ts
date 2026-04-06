@@ -142,6 +142,32 @@ describe('dispatch', () => {
     expect(seen[0]).toContain('proxy-a.example/base/relay/relay-secret/s/example.com%3A8443')
   })
 
+  it('drops content-encoding and content-length before returning to client', async () => {
+    const fetchSpy = vi.fn(async () => {
+      const headers = new Headers({
+        'content-type': 'text/html; charset=utf-8',
+        'content-encoding': 'gzip',
+        'content-length': '1234',
+      })
+
+      return new Response('<html>plain body</html>', {
+        status: 200,
+        headers,
+      })
+    })
+
+    const response = await dispatchRequest(
+      new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
+      route,
+      createConfig(),
+      fetchSpy,
+    )
+
+    expect(response.headers.get('content-encoding')).toBeNull()
+    expect(response.headers.get('content-length')).toBeNull()
+    expect(await response.text()).toBe('<html>plain body</html>')
+  })
+
   it('rewrites location and refresh from upstream response', async () => {
     const fetchSpy = vi.fn(async () => {
       const headers = new Headers({
