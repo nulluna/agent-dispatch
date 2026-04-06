@@ -106,6 +106,10 @@ async function writeResponse(response: Response, res: http.ServerResponse): Prom
   await new Promise<void>((resolve, reject) => {
     let settled = false
 
+    if (typeof res.flushHeaders === 'function') {
+      res.flushHeaders()
+    }
+
     const finish = (error?: Error) => {
       if (settled) {
         return

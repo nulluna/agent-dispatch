@@ -110,6 +110,38 @@ describe('dispatch', () => {
     expect(await second.text()).toContain('proxy-b.example/relay/relay-secret/s/example.com%3A8443')
   })
 
+  it('streams request body to the selected backend without failover', async () => {
+    const seen: string[] = []
+    const fetchSpy = vi
+      .fn<(_: Request) => Promise<Response>>()
+      .mockImplementationOnce(async (request: Request) => {
+        seen.push(request.url)
+        const body = await request.text()
+
+        expect(body).toBe('stream-body')
+
+        return new Response('stream-ok', { status: 200 })
+      })
+
+    const response = await dispatchRequest(
+      new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1', {
+        method: 'POST',
+        headers: {
+          'content-type': 'text/plain',
+        },
+        body: 'stream-body',
+      }),
+      route,
+      createConfig(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(await response.text()).toBe('stream-ok')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toContain('proxy-a.example/base/relay/relay-secret/s/example.com%3A8443')
+  })
+
   it('rewrites location and refresh from upstream response', async () => {
     const fetchSpy = vi.fn(async () => {
       const headers = new Headers({

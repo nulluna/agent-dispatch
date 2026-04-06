@@ -67,9 +67,17 @@ function createNodeRequest(req: http.IncomingMessage): Promise<Request> {
       (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim() || 'http'
     const host = req.headers.host ?? 'localhost'
     const url = new URL(req.url ?? '/', `${protocol}://${host}`)
+    const method = req.method ?? 'GET'
+    const chunks: Buffer[] = []
 
-    return new Request(url, {
-      method: req.method,
+    if (method !== 'GET' && method !== 'HEAD') {
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      }
+    }
+
+    const init: RequestInit & { duplex?: 'half' } = {
+      method,
       headers: Object.entries(req.headers).flatMap(([key, value]) => {
         if (typeof value === 'undefined') {
           return []
@@ -79,7 +87,14 @@ function createNodeRequest(req: http.IncomingMessage): Promise<Request> {
           ? value.map((item) => [key, item] as [string, string])
           : [[key, value] as [string, string]]
       }),
-    })
+    }
+
+    if (chunks.length > 0) {
+      init.body = Buffer.concat(chunks)
+      init.duplex = 'half'
+    }
+
+    return new Request(url, init)
   })()
 }
 
@@ -135,11 +150,33 @@ describe('server', () => {
       handleProxyRequest: HandleProxyRequest
     }
     const { handleProxyRequest } = proxyModule
-    const upstreamServer = http.createServer((req, res) => {
+    const upstreamServer = http.createServer(async (req, res) => {
       if (req.url?.startsWith('/redirect')) {
         res.statusCode = 302
         res.setHeader('location', '/done?ok=1')
         res.end()
+        return
+      }
+
+      if (req.url?.startsWith('/stream')) {
+        res.statusCode = 200
+        res.setHeader('content-type', 'text/event-stream')
+        res.write('data: first\n\n')
+        setTimeout(() => {
+          res.end('data: second\n\n')
+        }, 10)
+        return
+      }
+
+      if (req.method === 'POST' && req.url?.startsWith('/upload')) {
+        const chunks: Buffer[] = []
+        for await (const chunk of req) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+        }
+
+        res.statusCode = 200
+        res.setHeader('content-type', 'application/json')
+        res.end(JSON.stringify({ ok: true, path: req.url, body: Buffer.concat(chunks).toString('utf8') }))
         return
       }
 
@@ -159,11 +196,18 @@ describe('server', () => {
         rewritten.hostname = '127.0.0.1'
         rewritten.port = String(upstreamPort)
 
-        return fetch(new Request(rewritten, {
+        const init: RequestInit & { duplex?: 'half' } = {
           method: proxyRequest.method,
           headers: proxyRequest.headers,
           redirect: 'manual',
-        }))
+        }
+
+        if (proxyRequest.body !== null && proxyRequest.method !== 'GET' && proxyRequest.method !== 'HEAD') {
+          init.body = proxyRequest.body
+          init.duplex = 'half'
+        }
+
+        return fetch(new Request(rewritten, init))
       })
 
       await writeNodeResponse(response, res)
@@ -204,5 +248,31 @@ describe('server', () => {
     expect(redirectResponse.headers.get('location')).toBe(
       `http://127.0.0.1:${dispatchPort}/s/${upstreamHost}/done?ok=1`,
     )
+
+    const streamResponse = await fetch(
+      `http://127.0.0.1:${dispatchPort}/s/${upstreamHost}/stream`,
+    )
+
+    expect(streamResponse.status).toBe(200)
+    expect(streamResponse.headers.get('content-type')).toBe('text/event-stream')
+    expect(await streamResponse.text()).toBe('data: first\n\ndata: second\n\n')
+
+    const uploadResponse = await fetch(
+      `http://127.0.0.1:${dispatchPort}/s/${upstreamHost}/upload`,
+      {
+        method: 'POST',
+        headers: {
+          'content-type': 'text/plain',
+        },
+        body: 'stream-upload-body',
+      },
+    )
+
+    expect(uploadResponse.status).toBe(200)
+    await expect(uploadResponse.json()).resolves.toEqual({
+      ok: true,
+      path: '/upload',
+      body: 'stream-upload-body',
+    })
   })
 })

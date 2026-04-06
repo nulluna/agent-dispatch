@@ -41,6 +41,14 @@ interface ReplayableRequest {
   body?: ArrayBuffer
 }
 
+interface StreamForwardRequest {
+  method: string
+  headers: Headers
+  body: ReadableStream<Uint8Array>
+}
+
+type ForwardRequest = ReplayableRequest | StreamForwardRequest
+
 interface AttemptControllerState {
   signal: AbortSignal
   cleanup: () => void
@@ -142,6 +150,22 @@ async function createReplayableRequest(request: Request): Promise<ReplayableRequ
   }
 }
 
+function createStreamForwardRequest(request: Request): StreamForwardRequest {
+  if (request.body === null) {
+    throw new DispatchError(500, 'MISSING_REQUEST_BODY', '流式请求缺少 body')
+  }
+
+  return {
+    method: request.method,
+    headers: filterForwardHeaders(request.headers),
+    body: request.body,
+  }
+}
+
+function canStreamRequestBody(request: Request): boolean {
+  return request.body !== null && request.method !== 'GET' && request.method !== 'HEAD'
+}
+
 function createAttemptController(
   parentSignal: AbortSignal | undefined,
   timeoutMs: number,
@@ -181,7 +205,7 @@ function createAttemptController(
 
 function createRelayRequest(
   relayUrl: URL,
-  request: ReplayableRequest,
+  request: ForwardRequest,
   signal: AbortSignal,
 ): Request {
   const init: RequestInit & { duplex?: 'half' } = {
@@ -191,8 +215,8 @@ function createRelayRequest(
     signal,
   }
 
-  if (request.body && request.method !== 'GET' && request.method !== 'HEAD') {
-    init.body = request.body.slice(0)
+  if ('body' in request && request.body && request.method !== 'GET' && request.method !== 'HEAD') {
+    init.body = request.body instanceof ArrayBuffer ? request.body.slice(0) : request.body
     init.duplex = 'half'
   }
 
@@ -332,6 +356,34 @@ export async function dispatchRequest(
   config: RuntimeConfig,
   fetchImplementation: FetchImplementation = (relayRequest) => fetch(relayRequest),
 ): Promise<Response> {
+  if (canStreamRequestBody(request)) {
+    const { candidates, preferredCount } = getProxyCandidates(config.proxyUrls)
+    const startIndex = reserveStartIndex(preferredCount)
+    const proxyUrl = candidates[startIndex % candidates.length]
+    const relayUrl = buildRelayUrl(proxyUrl, config.dispatchSecret, route)
+    const controllerState = createAttemptController(request.signal, config.requestTimeoutMs)
+
+    try {
+      const relayRequest = createRelayRequest(
+        relayUrl,
+        createStreamForwardRequest(request),
+        controllerState.signal,
+      )
+      const response = await fetchImplementation(relayRequest)
+
+      return createClientResponse(request, route, response)
+    } catch (error) {
+      if (controllerState.timedOut()) {
+        markProxyUnhealthy(proxyUrl, config.failoverCooldownMs)
+        throw buildExhaustedProxyError(error, true)
+      }
+
+      throw error
+    } finally {
+      controllerState.cleanup()
+    }
+  }
+
   const replayableRequest = await createReplayableRequest(request)
   const { candidates, preferredCount } = getProxyCandidates(config.proxyUrls)
   const startIndex = reserveStartIndex(preferredCount)
