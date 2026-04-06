@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { Readable } from 'node:stream'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
 import http from 'node:http'
@@ -5,7 +6,12 @@ import { fileURLToPath } from 'node:url'
 
 import { getRuntimeConfig, loadEnvFromProcess, type DispatchEnv } from './config.js'
 import { createApp, type AppOptions } from './index.js'
-import { writeJsonLog, type LogWriter } from './logging.js'
+import {
+  createRequestLogContext,
+  INTERNAL_REQUEST_ID_HEADER,
+  writeJsonLog,
+  type LogWriter,
+} from './logging.js'
 
 const RESPONSE_WRITE_TIMEOUT_MS = 30_000
 
@@ -60,11 +66,13 @@ async function readRequestBody(
 }
 
 async function writeResponseBody(
+  request: Request,
   response: Response,
   res: http.ServerResponse,
   logWriter?: LogWriter,
 ): Promise<void> {
   const startAt = Date.now()
+  const baseContext = createRequestLogContext(request)
   let settled = false
   let sawFirstChunk = false
   let responseFinished = false
@@ -74,13 +82,20 @@ async function writeResponseBody(
   const logWriteBack = (event: string, extra: Record<string, unknown> = {}) => {
     writeJsonLog(
       {
+        level: event.includes('timeout') || event.includes('error') ? 'error' : 'info',
         event,
-        status: response.status,
-        headersSent: res.headersSent,
-        writableEnded: res.writableEnded,
-        writableFinished: res.writableFinished,
-        durationMs: Date.now() - startAt,
-        ...extra,
+        ...baseContext,
+        response: {
+          status: response.status,
+          statusText: response.statusText,
+          headersSent: res.headersSent,
+          writableEnded: res.writableEnded,
+          writableFinished: res.writableFinished,
+        },
+        writeBack: {
+          durationMs: Date.now() - startAt,
+          ...extra,
+        },
       },
       logWriter,
     )
@@ -217,9 +232,14 @@ async function toRequest(request: http.IncomingMessage): Promise<Request> {
   const method = request.method ?? 'GET'
   const body = method !== 'GET' && method !== 'HEAD' ? await readRequestBody(request) : null
 
+  const headers = new Headers(toHeaders(request.headers))
+  if (!headers.has(INTERNAL_REQUEST_ID_HEADER)) {
+    headers.set(INTERNAL_REQUEST_ID_HEADER, randomUUID())
+  }
+
   const init: RequestInit & { duplex?: 'half' } = {
     method,
-    headers: toHeaders(request.headers),
+    headers,
     body: body ? new Uint8Array(body) : null,
   }
 
@@ -252,13 +272,28 @@ export function createServer(options: AppOptions = {}): http.Server {
 
   return http.createServer((req, res) => {
     void (async () => {
+      const request = await toRequest(req)
+      const requestContext = createRequestLogContext(request)
+
       try {
-        const response = await app.handle(await toRequest(req))
+        const response = await app.handle(request)
         res.statusCode = response.status
         res.statusMessage = response.statusText
         applyResponseHeaders(response, res)
-        await writeResponseBody(response, res, options.logWriter)
-      } catch {
+        await writeResponseBody(request, response, res, options.logWriter)
+      } catch (error) {
+        writeJsonLog(
+          {
+            level: 'error',
+            event: 'dispatch.server_error',
+            ...requestContext,
+            error: {
+              message: error instanceof Error ? error.message : 'unknown error',
+            },
+          },
+          options.logWriter,
+        )
+
         if (!res.headersSent) {
           res.statusCode = 500
           res.end('Internal Server Error')

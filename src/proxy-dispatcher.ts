@@ -7,7 +7,8 @@ import {
 
 import type { RuntimeConfig, Socks5ProxyConfig } from './config.js'
 import { DispatchError } from './errors.js'
-import { writeJsonLog, type LogWriter } from './logging.js'
+import { createRequestLogContext, getRequestIdFromRequest, writeJsonLog, type LogWriter } from './logging.js'
+import type { ProxyRoute } from './routing.js'
 
 export interface ProxyFetchResponse {
   status: number
@@ -40,6 +41,8 @@ export interface ProxyDispatchOptions {
   proxyUrls: readonly URL[]
   buildRelayUrl: (proxyUrl: URL) => URL
   request: ReplayableRequest
+  requestInfo?: Request
+  route?: ProxyRoute
   timeoutMs: number
   signal?: AbortSignal
   dispatcher?: Dispatcher | null
@@ -119,6 +122,8 @@ export async function dispatchAcrossProxies(
     proxyUrls,
     buildRelayUrl,
     request,
+    requestInfo,
+    route,
     timeoutMs,
     signal,
     dispatcher,
@@ -136,15 +141,21 @@ export async function dispatchAcrossProxies(
   for (const [index, proxyUrl] of proxyUrls.entries()) {
     const relayUrl = buildRelayUrl(proxyUrl)
     const attemptAbort = createAttemptAbortController(signal, timeoutMs)
+    const baseContext = createAttemptLogContext({
+      requestInfo,
+      route,
+      attempt: index + 1,
+      proxyUrl,
+      relayUrl,
+    })
 
     try {
       writeJsonLog(
         {
-          event: 'proxy_dispatch_attempt',
-          attempt: index + 1,
-          proxyUrl: proxyUrl.toString(),
-          relayUrl: relayUrl.toString(),
-          method: request.method,
+          level: 'info',
+          event: 'proxy.dispatch.attempt',
+          phase: 'proxy',
+          ...baseContext,
         },
         logWriter,
       )
@@ -157,11 +168,14 @@ export async function dispatchAcrossProxies(
 
       writeJsonLog(
         {
-          event: 'proxy_dispatch_success',
-          attempt: index + 1,
-          proxyUrl: proxyUrl.toString(),
-          relayUrl: relayUrl.toString(),
-          status: response.status,
+          level: 'info',
+          event: 'proxy.dispatch.success',
+          phase: 'proxy',
+          ...baseContext,
+          response: {
+            status: response.status,
+            statusText: response.statusText,
+          },
         },
         logWriter,
       )
@@ -175,6 +189,8 @@ export async function dispatchAcrossProxies(
     } catch (error) {
       const timedOut = attemptAbort.timedOut()
       const upstreamAborted = attemptAbort.abortedByUpstream()
+      const failover = shouldFailover(error, timedOut, upstreamAborted)
+      const failureKind = classifyFailure(error, timedOut, upstreamAborted)
 
       if (timedOut) {
         sawTimeout = true
@@ -182,20 +198,23 @@ export async function dispatchAcrossProxies(
 
       writeJsonLog(
         {
-          event: 'proxy_dispatch_failure',
-          attempt: index + 1,
-          proxyUrl: proxyUrl.toString(),
-          relayUrl: relayUrl.toString(),
+          level: failover ? 'warn' : 'error',
+          event: 'proxy.dispatch.failure',
+          phase: 'proxy',
+          ...baseContext,
           timedOut,
           upstreamAborted,
-          errorCode: getErrorCode(error),
-          error: stringifyError(error),
-          failover: shouldFailover(error, timedOut, upstreamAborted),
+          failover,
+          failureKind,
+          error: {
+            code: getErrorCode(error),
+            message: stringifyError(error),
+          },
         },
         logWriter,
       )
 
-      if (!shouldFailover(error, timedOut, upstreamAborted)) {
+      if (!failover) {
         throw error
       }
 
@@ -206,6 +225,27 @@ export async function dispatchAcrossProxies(
   }
 
   throw buildExhaustedProxyError(lastError, sawTimeout)
+}
+
+function createAttemptLogContext(options: {
+  requestInfo?: Request
+  route?: ProxyRoute
+  attempt: number
+  proxyUrl: URL
+  relayUrl: URL
+}): Record<string, unknown> {
+  const { requestInfo, route, attempt, proxyUrl, relayUrl } = options
+  const requestContext = requestInfo ? createRequestLogContext(requestInfo, route) : {}
+
+  return {
+    ...requestContext,
+    requestId: requestInfo ? getRequestIdFromRequest(requestInfo) : 'unknown',
+    proxy: {
+      attempt,
+      proxyUrl: proxyUrl.toString(),
+      relayUrl: relayUrl.toString(),
+    },
+  }
 }
 
 function buildFetchInit(options: {
@@ -309,6 +349,35 @@ function shouldFailover(
   return isAbortError(error)
 }
 
+function classifyFailure(
+  error: unknown,
+  timedOut: boolean,
+  upstreamAborted: boolean,
+): 'timeout' | 'upstream_abort' | 'network' | 'dispatch_error' | 'abort' | 'unknown' {
+  if (error instanceof DispatchError) {
+    return 'dispatch_error'
+  }
+
+  if (upstreamAborted) {
+    return 'upstream_abort'
+  }
+
+  if (timedOut) {
+    return 'timeout'
+  }
+
+  const errorCode = getErrorCode(error)
+  if (errorCode && RETRYABLE_NETWORK_ERROR_CODES.has(errorCode)) {
+    return 'network'
+  }
+
+  if (isAbortError(error)) {
+    return 'abort'
+  }
+
+  return 'unknown'
+}
+
 function buildExhaustedProxyError(
   lastError: unknown,
   sawTimeout: boolean,
@@ -399,5 +468,5 @@ function stringifyError(error: unknown): string {
 function isRuntimeConfig(
   value: RuntimeConfig | Socks5ProxyConfig | null,
 ): value is RuntimeConfig {
-  return value !== null && 'socks5Proxy' in value
+  return value !== null && 'proxyUrls' in value
 }

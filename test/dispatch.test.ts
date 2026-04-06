@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { handleProxyRequest, type ProxyEnv } from '../../agent-proxy/src/proxy.js'
 import { dispatchRequest, type FetchImplementation } from '../src/dispatch.js'
+import type { LogWriter } from '../src/logging.js'
 import type { RuntimeConfig } from '../src/config.js'
 import type { ProxyRoute } from '../src/routing.js'
 
@@ -276,6 +277,32 @@ describe('dispatchRequest', () => {
     ).rejects.toMatchObject({
       status: 502,
       code: 'PROXY_DISPATCH_FAILED',
+    })
+  })
+
+  it('emits proxy failure logs with phase and failureKind', async () => {
+    const logs: string[] = []
+    const logWriter: LogWriter = (entry) => logs.push(entry)
+    const fetchSpy = vi.fn<FetchImplementation>()
+    fetchSpy.mockRejectedValueOnce(Object.assign(new Error('connect failed'), { code: 'ECONNRESET' }))
+    fetchSpy.mockResolvedValueOnce(createFetchResponse('ok-from-b', 200))
+
+    const response = await dispatchRequest(
+      new Request('http://dispatch.example/s/www.google.com/search?q=1'),
+      createRoute(),
+      createConfig(),
+      fetchSpy,
+      logWriter,
+    )
+
+    expect(response.status).toBe(200)
+    const parsedLogs = logs.map((entry) => JSON.parse(entry))
+    expect(parsedLogs.find((entry) => entry.event === 'proxy.dispatch.failure')).toMatchObject({
+      phase: 'proxy',
+      failureKind: 'network',
+    })
+    expect(parsedLogs.find((entry) => entry.event === 'dispatch.relay_complete')).toMatchObject({
+      phase: 'relay',
     })
   })
 })

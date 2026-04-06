@@ -2,7 +2,12 @@ import { type Dispatcher } from 'undici'
 
 import type { RuntimeConfig } from './config.js'
 import { DispatchError } from './errors.js'
-import { type LogWriter } from './logging.js'
+import {
+  createRequestLogContext,
+  getRequestIdFromRequest,
+  type LogWriter,
+  writeJsonLog,
+} from './logging.js'
 import type { ProxyRoute } from './routing.js'
 import { buildUpstreamUrlFromRoute, rewriteResponseHeaders } from './rewrite.js'
 import {
@@ -59,6 +64,22 @@ export async function dispatchRequest(
 ): Promise<Response> {
   const dispatcher = createProxyDispatcher(config.socks5Proxy)
   const cleanupDispatcher = createDispatcherCleanup(dispatcher)
+  const baseContext = createRequestLogContext(request, route)
+
+  writeJsonLog(
+    {
+      level: 'info',
+      event: 'dispatch.relay_start',
+      phase: 'relay',
+      ...baseContext,
+      proxyPool: {
+        size: config.proxyUrls.length,
+        timeoutMs: config.requestTimeoutMs,
+        socks5Enabled: Boolean(config.socks5Proxy),
+      },
+    },
+    logWriter,
+  )
 
   try {
     const proxyDispatchResult = await dispatchAcrossProxies({
@@ -66,6 +87,8 @@ export async function dispatchRequest(
       buildRelayUrl: (proxyUrl: URL) =>
         buildRelayUrl(proxyUrl, config.dispatchSecret, route),
       request: await createReplayableRequest(request),
+      requestInfo: request,
+      route,
       timeoutMs: config.requestTimeoutMs,
       signal: request.signal,
       dispatcher,
@@ -73,14 +96,55 @@ export async function dispatchRequest(
       logWriter,
     })
 
-    return createRelayResponse({
+    const response = createRelayResponse({
       request,
       route,
       proxyDispatchResult,
       cleanupDispatcher,
     })
+
+    writeJsonLog(
+      {
+        level: 'info',
+        event: 'dispatch.relay_complete',
+        phase: 'relay',
+        ...baseContext,
+        proxy: {
+          selectedUrl: proxyDispatchResult.proxyUrl.toString(),
+          relayUrl: proxyDispatchResult.relayUrl.toString(),
+          attemptCount: proxyDispatchResult.attemptCount,
+        },
+        response: {
+          status: response.status,
+          statusText: response.statusText,
+          headers: {
+            'content-type': response.headers.get('content-type'),
+            location: response.headers.get('location'),
+          },
+        },
+      },
+      logWriter,
+    )
+
+    return response
   } catch (error) {
     await cleanupDispatcher()
+
+    writeJsonLog(
+      {
+        level: 'error',
+        event: 'dispatch.relay_failed',
+        phase: 'relay',
+        ...baseContext,
+        requestId: getRequestIdFromRequest(request),
+        error: {
+          code: error instanceof DispatchError ? error.code : 'PROXY_DISPATCH_FAILED',
+          message: error instanceof Error ? error.message : 'unknown error',
+        },
+      },
+      logWriter,
+    )
+
     throw error
   }
 }

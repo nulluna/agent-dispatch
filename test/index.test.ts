@@ -219,6 +219,7 @@ describe('node bootstrap', () => {
     expect(fetchSpy).not.toHaveBeenCalled()
     expect(JSON.parse(logs[0])).toMatchObject({
       event: 'dispatch.invalid_route',
+      phase: 'routing',
       reason: 'missing_protocol_code',
       pathname: '/www.google.com',
       search: '?q=1',
@@ -263,6 +264,7 @@ describe('node bootstrap', () => {
       expect(fetchSpy).not.toHaveBeenCalled()
       expect(JSON.parse(logs[0] ?? '{}')).toMatchObject({
         event: 'dispatch.invalid_route',
+        phase: 'routing',
         reason: 'missing_protocol_code',
         pathname: '/search',
         search: '?q=1',
@@ -350,7 +352,8 @@ describe('node bootstrap', () => {
       expect(response.closeHadError).toBe(false)
       expect(response.timedOut).toBe(false)
       expect(response.errorMessage).toBeNull()
-      expect(logs.map((entry) => JSON.parse(entry).event)).toEqual(
+      const parsedLogs = logs.map((entry) => JSON.parse(entry))
+      expect(parsedLogs.map((entry) => entry.event)).toEqual(
         expect.arrayContaining([
           'dispatch.write_back_start',
           'dispatch.write_back_first_chunk',
@@ -358,6 +361,10 @@ describe('node bootstrap', () => {
           'dispatch.write_back_finish',
         ]),
       )
+      expect(parsedLogs.find((entry) => entry.event === 'dispatch.request_completed')).toMatchObject({
+        phase: 'request',
+        durationMs: expect.any(Number),
+      })
     } finally {
       await close(server)
     }
