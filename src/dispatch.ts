@@ -23,6 +23,10 @@ import {
 
 export type FetchImplementation = (input: URL | string, init?: RequestInit) => Promise<Response>
 
+export const INTERNAL_PROXY_URL_HEADER = 'x-dispatch-internal-proxy-url'
+export const INTERNAL_RELAY_URL_HEADER = 'x-dispatch-internal-relay-url'
+export const INTERNAL_PROXY_ATTEMPT_HEADER = 'x-dispatch-internal-proxy-attempt'
+
 const HOP_BY_HOP_REQUEST_HEADERS = new Set([
   'connection',
   'host',
@@ -168,6 +172,9 @@ function createRelayResponse(options: {
   const upstreamUrl = buildUpstreamUrlFromRoute(route)
   const dispatchUrl = new URL(request.url)
   const headers = rewriteResponseHeaders(new Headers(response.headers), upstreamUrl, dispatchUrl)
+  headers.set(INTERNAL_PROXY_URL_HEADER, proxyDispatchResult.proxyUrl.toString())
+  headers.set(INTERNAL_RELAY_URL_HEADER, proxyDispatchResult.relayUrl.toString())
+  headers.set(INTERNAL_PROXY_ATTEMPT_HEADER, String(proxyDispatchResult.attemptCount))
   const body = wrapResponseBody(response.body, cleanupDispatcher)
 
   if (body === null) {
@@ -236,12 +243,13 @@ function normalizeRequestInit(init: ProxyFetchInit | undefined): RequestInit | u
     return undefined
   }
 
-  const requestInit: RequestInit & { duplex?: 'half' } = {
+  const requestInit: RequestInit & { duplex?: 'half'; dispatcher?: Dispatcher } = {
     method: init.method,
     headers: init.headers,
     body: init.body,
     signal: init.signal,
     duplex: init.duplex,
+    dispatcher: init.dispatcher,
   }
 
   return requestInit

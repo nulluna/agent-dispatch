@@ -305,4 +305,29 @@ describe('dispatchRequest', () => {
       phase: 'relay',
     })
   })
+
+  it('passes socks dispatcher through fetch init when socks5 proxy is configured', async () => {
+    const fetchSpy = vi.fn<FetchImplementation>(async (_input, init) => {
+      expect((init as RequestInit & { dispatcher?: unknown })?.dispatcher).toBeTruthy()
+      return createFetchResponse('ok', 200)
+    })
+
+    const response = await dispatchRequest(
+      new Request('http://dispatch.example/s/www.google.com/search?q=1'),
+      createRoute(),
+      createConfig({
+        socks5Proxy: {
+          type: 5,
+          host: '127.0.0.1',
+          port: 1080,
+          userId: 'u',
+          password: 'p',
+        },
+      }),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(200)
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
 })

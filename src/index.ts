@@ -95,7 +95,7 @@ async function handleRequest(
     writeJsonLog(
       {
         level: 'info',
-        event: 'dispatch.request_completed',
+        event: 'dispatch.response_ready',
         phase: 'request',
         ...baseContext,
         durationMs: Date.now() - startedAt,

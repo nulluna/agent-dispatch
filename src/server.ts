@@ -12,8 +12,13 @@ import {
   writeJsonLog,
   type LogWriter,
 } from './logging.js'
+import {
+  INTERNAL_PROXY_ATTEMPT_HEADER,
+  INTERNAL_PROXY_URL_HEADER,
+  INTERNAL_RELAY_URL_HEADER,
+} from './dispatch.js'
 
-const RESPONSE_WRITE_TIMEOUT_MS = 30_000
+const RESPONSE_WRITE_IDLE_TIMEOUT_MS = 30_000
 
 function toHeaders(headers: http.IncomingHttpHeaders): HeadersInit {
   const normalized: Array<[string, string]> = []
@@ -79,12 +84,24 @@ async function writeResponseBody(
   let responseErrored = false
   let requestAborted = false
 
+  const proxyUrl = response.headers.get(INTERNAL_PROXY_URL_HEADER)
+  const relayUrl = response.headers.get(INTERNAL_RELAY_URL_HEADER)
+  const proxyAttempt = response.headers.get(INTERNAL_PROXY_ATTEMPT_HEADER)
+
   const logWriteBack = (event: string, extra: Record<string, unknown> = {}) => {
     writeJsonLog(
       {
         level: event.includes('timeout') || event.includes('error') ? 'error' : 'info',
         event,
+        phase: 'write_back',
         ...baseContext,
+        proxy: proxyUrl
+          ? {
+              proxyUrl,
+              relayUrl,
+              attemptCount: proxyAttempt ? Number(proxyAttempt) : undefined,
+            }
+          : undefined,
         response: {
           status: response.status,
           statusText: response.statusText,
@@ -168,6 +185,7 @@ async function writeResponseBody(
       }
 
       sawFirstChunk = true
+      resetIdleTimeout()
       logWriteBack('dispatch.write_back_first_chunk')
     }
 
@@ -186,16 +204,22 @@ async function writeResponseBody(
       logWriteBack('dispatch.write_back_stream_close')
     }
 
-    const timeout = setTimeout(() => {
-      logWriteBack('dispatch.write_back_timeout')
-      if (!res.writableEnded) {
-        requestAborted = true
-        res.destroy()
-        return
-      }
+    let timeout: NodeJS.Timeout
+    const resetIdleTimeout = () => {
+      clearTimeout(timeout)
+      timeout = setTimeout(() => {
+        logWriteBack('dispatch.write_back_timeout')
+        if (!res.writableEnded) {
+          requestAborted = true
+          res.destroy()
+          return
+        }
 
-      finish(new Error('response write timeout'))
-    }, RESPONSE_WRITE_TIMEOUT_MS)
+        finish(new Error('response write timeout'))
+      }, RESPONSE_WRITE_IDLE_TIMEOUT_MS)
+    }
+
+    resetIdleTimeout()
 
     let nodeStream: Readable | null = null
 
@@ -215,6 +239,9 @@ async function writeResponseBody(
     }
 
     nodeStream = Readable.fromWeb(response.body as NodeReadableStream)
+    nodeStream.on('data', () => {
+      resetIdleTimeout()
+    })
     nodeStream.on('data', handleFirstChunk)
     nodeStream.on('error', handleStreamError)
     nodeStream.on('end', handleStreamEnd)
@@ -252,7 +279,16 @@ async function toRequest(request: http.IncomingMessage): Promise<Request> {
 
 function applyResponseHeaders(response: Response, res: http.ServerResponse): void {
   response.headers.forEach((value, key) => {
-    if (key.toLowerCase() === 'set-cookie') {
+    const lowerKey = key.toLowerCase()
+    if (lowerKey === 'set-cookie') {
+      return
+    }
+
+    if (
+      lowerKey === INTERNAL_PROXY_URL_HEADER ||
+      lowerKey === INTERNAL_RELAY_URL_HEADER ||
+      lowerKey === INTERNAL_PROXY_ATTEMPT_HEADER
+    ) {
       return
     }
 

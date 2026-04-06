@@ -361,9 +361,17 @@ describe('node bootstrap', () => {
           'dispatch.write_back_finish',
         ]),
       )
-      expect(parsedLogs.find((entry) => entry.event === 'dispatch.request_completed')).toMatchObject({
+      expect(parsedLogs.find((entry) => entry.event === 'dispatch.response_ready')).toMatchObject({
         phase: 'request',
         durationMs: expect.any(Number),
+      })
+      expect(parsedLogs.find((entry) => entry.event === 'dispatch.write_back_finish')).toMatchObject({
+        phase: 'write_back',
+        proxy: {
+          proxyUrl: 'https://proxy-a.example/',
+          relayUrl: 'https://proxy-a.example/relay/relay-secret/s/www.google.com/search?q=1',
+          attemptCount: 1,
+        },
       })
     } finally {
       await close(server)

@@ -190,6 +190,56 @@ describe('server write-back semantics', () => {
     }
   })
 
+  it('does not timeout while chunks keep flowing before idle timeout', async () => {
+    const realSetTimeout = globalThis.setTimeout
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+      ((handler: TimerHandler, timeout?: number, ...args: unknown[]) =>
+        realSetTimeout(handler, timeout === 30_000 ? 20 : timeout, ...args)) as typeof setTimeout,
+    )
+
+    const encoder = new TextEncoder()
+    const server = createServer({
+      env: createEnv(),
+      fetchImplementation: vi.fn(async () => {
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(encoder.encode('a'))
+              realSetTimeout(() => controller.enqueue(encoder.encode('b')), 5)
+              realSetTimeout(() => {
+                controller.enqueue(encoder.encode('c'))
+                controller.close()
+              }, 10)
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'text/plain; charset=utf-8',
+            },
+          },
+        )
+      }),
+    })
+
+    try {
+      const port = await listen(server)
+      const response = await sendHttpRequest({
+        port,
+        path: '/s/www.google.com/search?q=1',
+        timeoutMs: 200,
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toBe('abc')
+      expect(response.completed).toBe(true)
+      expect(response.aborted).toBe(false)
+      expect(response.timedOut).toBe(false)
+    } finally {
+      await close(server)
+    }
+  })
+
   it('flushes headers early and uses chunked framing for streaming bodies without content-length', async () => {
     let releaseBody: (() => void) | null = null
     const server = createServer({
