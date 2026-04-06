@@ -1,4 +1,4 @@
-import type { RuntimeConfig } from './config.js'
+import type { BackendSelectionStrategy, RuntimeConfig } from './config.js'
 import { DispatchError } from './errors.js'
 import type { ProxyRoute } from './routing.js'
 import { buildUpstreamUrlFromRoute, rewriteResponseHeaders } from './rewrite.js'
@@ -97,6 +97,35 @@ function reserveStartIndex(proxyCount: number): number {
   nextProxyIndex = (nextProxyIndex + 1) % proxyCount
 
   return index
+}
+
+function hashString(value: string): number {
+  let hash = 0x811c9dc5
+
+  for (let i = 0; i < value.length; i += 1) {
+    hash ^= value.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+
+  return hash >>> 0
+}
+
+function buildConsistentHashKey(route: ProxyRoute): string {
+  return `${route.protocolCode}:${route.targetHost}:${route.targetPathname}`
+}
+
+function selectStartIndex(options: {
+  strategy: BackendSelectionStrategy
+  route: ProxyRoute
+  preferredCount: number
+}): number {
+  const { strategy, route, preferredCount } = options
+
+  if (strategy === 'round-robin') {
+    return reserveStartIndex(preferredCount)
+  }
+
+  return hashString(buildConsistentHashKey(route)) % preferredCount
 }
 
 function trimTrailingSlash(pathname: string): string {
@@ -397,7 +426,11 @@ export async function dispatchRequest(
 ): Promise<Response> {
   if (canStreamRequestBody(request)) {
     const { candidates, preferredCount } = getProxyCandidates(config.proxyUrls)
-    const startIndex = reserveStartIndex(preferredCount)
+    const startIndex = selectStartIndex({
+      strategy: config.backendSelectionStrategy,
+      route,
+      preferredCount,
+    })
     const proxyUrl = candidates[startIndex % candidates.length]
     const relayUrl = buildRelayUrl(proxyUrl, config.dispatchSecret, route)
     const controllerState = createAttemptController(request.signal, config.requestTimeoutMs)
@@ -410,6 +443,7 @@ export async function dispatchRequest(
       proxyUrl: proxyUrl.toString(),
       allowFailover: false,
       hasBody: true,
+      strategy: config.backendSelectionStrategy,
     })
 
     try {
@@ -435,7 +469,11 @@ export async function dispatchRequest(
 
   const replayableRequest = await createReplayableRequest(request)
   const { candidates, preferredCount } = getProxyCandidates(config.proxyUrls)
-  const startIndex = reserveStartIndex(preferredCount)
+  const startIndex = selectStartIndex({
+    strategy: config.backendSelectionStrategy,
+    route,
+    preferredCount,
+  })
   let lastError: unknown
   let sawTimeout = false
 
@@ -447,12 +485,21 @@ export async function dispatchRequest(
     preferredCount,
     allowFailover: true,
     hasBody: false,
+    strategy: config.backendSelectionStrategy,
   })
 
   for (let attempt = 0; attempt < candidates.length; attempt += 1) {
     const proxyUrl = candidates[(startIndex + attempt) % candidates.length]
     const relayUrl = buildRelayUrl(proxyUrl, config.dispatchSecret, route)
     const controllerState = createAttemptController(request.signal, config.requestTimeoutMs)
+
+    logDispatch('relay-attempt', {
+      attempt: attempt + 1,
+      strategy: config.backendSelectionStrategy,
+      requestUrl: request.url,
+      proxyUrl: proxyUrl.toString(),
+      relayUrl: relayUrl.toString(),
+    })
 
     try {
       const relayRequest = createRelayRequest(relayUrl, replayableRequest, controllerState.signal)

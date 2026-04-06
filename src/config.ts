@@ -1,9 +1,12 @@
+export type BackendSelectionStrategy = 'round-robin' | 'consistent-hashing'
+
 export interface DispatchEnv {
   PORT?: string
   DISPATCH_SECRET?: string
   AGENT_PROXY_URLS?: string
   REQUEST_TIMEOUT_MS?: string
   FAILOVER_COOLDOWN_MS?: string
+  BACKEND_SELECTION_STRATEGY?: string
 }
 
 export interface RuntimeConfig {
@@ -12,11 +15,13 @@ export interface RuntimeConfig {
   proxyUrls: URL[]
   requestTimeoutMs: number
   failoverCooldownMs: number
+  backendSelectionStrategy: BackendSelectionStrategy
 }
 
 const DEFAULT_PORT = 8787
 const DEFAULT_REQUEST_TIMEOUT_MS = 5000
 const DEFAULT_FAILOVER_COOLDOWN_MS = 3000
+const DEFAULT_BACKEND_SELECTION_STRATEGY: BackendSelectionStrategy = 'consistent-hashing'
 
 function parsePositiveInteger(
   value: string | undefined,
@@ -46,6 +51,22 @@ function parseDispatchSecret(value?: string): string {
   }
 
   return secret
+}
+
+function parseBackendSelectionStrategy(
+  value?: string,
+): BackendSelectionStrategy {
+  const normalized = value?.trim().toLowerCase()
+
+  if (!normalized) {
+    return DEFAULT_BACKEND_SELECTION_STRATEGY
+  }
+
+  if (normalized === 'round-robin' || normalized === 'consistent-hashing') {
+    return normalized
+  }
+
+  throw new Error('BACKEND_SELECTION_STRATEGY 只允许 round-robin 或 consistent-hashing')
 }
 
 function parseProxyUrls(value?: string): URL[] {
@@ -82,6 +103,7 @@ export function loadEnvFromProcess(processEnv: NodeJS.ProcessEnv): DispatchEnv {
     AGENT_PROXY_URLS: processEnv.AGENT_PROXY_URLS,
     REQUEST_TIMEOUT_MS: processEnv.REQUEST_TIMEOUT_MS,
     FAILOVER_COOLDOWN_MS: processEnv.FAILOVER_COOLDOWN_MS,
+    BACKEND_SELECTION_STRATEGY: processEnv.BACKEND_SELECTION_STRATEGY,
   }
 }
 
@@ -99,6 +121,9 @@ export function getRuntimeConfig(env: DispatchEnv): RuntimeConfig {
       env.FAILOVER_COOLDOWN_MS,
       'FAILOVER_COOLDOWN_MS',
       DEFAULT_FAILOVER_COOLDOWN_MS,
+    ),
+    backendSelectionStrategy: parseBackendSelectionStrategy(
+      env.BACKEND_SELECTION_STRATEGY,
     ),
   }
 }

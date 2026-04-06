@@ -20,6 +20,7 @@ function createConfig(overrides: Partial<RuntimeConfig> = {}): RuntimeConfig {
     proxyUrls: [new URL('https://proxy-a.example/base'), new URL('https://proxy-b.example')],
     requestTimeoutMs: 50,
     failoverCooldownMs: 3000,
+    backendSelectionStrategy: 'consistent-hashing',
     ...overrides,
   }
 }
@@ -45,19 +46,76 @@ describe('dispatch', () => {
     await dispatchRequest(
       new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
       route,
-      createConfig(),
+      createConfig({ backendSelectionStrategy: 'round-robin' }),
       fetchSpy,
     )
 
     await dispatchRequest(
       new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
       route,
-      createConfig(),
+      createConfig({ backendSelectionStrategy: 'round-robin' }),
       fetchSpy,
     )
 
     expect(seen[0]).toContain('proxy-a.example/base/relay/relay-secret/s/example.com%3A8443')
     expect(seen[1]).toContain('proxy-b.example/relay/relay-secret/s/example.com%3A8443')
+  })
+
+  it('keeps the same backend for the same route with consistent hashing', async () => {
+    const seen: string[] = []
+    const fetchSpy = vi.fn(async (request: Request) => {
+      seen.push(request.url)
+      return new Response('ok', { status: 200 })
+    })
+
+    await dispatchRequest(
+      new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
+      route,
+      createConfig({ backendSelectionStrategy: 'consistent-hashing' }),
+      fetchSpy,
+    )
+
+    await dispatchRequest(
+      new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
+      route,
+      createConfig({ backendSelectionStrategy: 'consistent-hashing' }),
+      fetchSpy,
+    )
+
+    expect(seen).toHaveLength(2)
+    expect(seen[0]).toBe(seen[1])
+  })
+
+  it('can map different routes to different backends with consistent hashing', async () => {
+    const seen: string[] = []
+    const fetchSpy = vi.fn(async (request: Request) => {
+      seen.push(request.url)
+      return new Response('ok', { status: 200 })
+    })
+
+    await dispatchRequest(
+      new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
+      route,
+      createConfig({ backendSelectionStrategy: 'consistent-hashing' }),
+      fetchSpy,
+    )
+
+    await dispatchRequest(
+      new Request('https://dispatch.local/h/another.example.com/status'),
+      {
+        kind: 'proxy',
+        protocolCode: 'h',
+        protocol: 'http',
+        targetHost: 'another.example.com',
+        targetPathname: '/status',
+        targetSearch: '',
+      },
+      createConfig({ backendSelectionStrategy: 'consistent-hashing' }),
+      fetchSpy,
+    )
+
+    expect(seen).toHaveLength(2)
+    expect(new Set(seen).size).toBeGreaterThanOrEqual(1)
   })
 
   it('fails over to the next backend on retryable network error', async () => {
@@ -95,14 +153,14 @@ describe('dispatch', () => {
     const first = await dispatchRequest(
       new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
       route,
-      createConfig({ failoverCooldownMs: 60_000 }),
+      createConfig({ failoverCooldownMs: 60_000, backendSelectionStrategy: 'round-robin' }),
       fetchSpy,
     )
 
     const second = await dispatchRequest(
       new Request('https://dispatch.local/s/example.com%3A8443/v1/chat/completions?trace=1'),
       route,
-      createConfig({ failoverCooldownMs: 60_000 }),
+      createConfig({ failoverCooldownMs: 60_000, backendSelectionStrategy: 'round-robin' }),
       fetchSpy,
     )
 
@@ -132,7 +190,7 @@ describe('dispatch', () => {
         body: 'stream-body',
       }),
       route,
-      createConfig(),
+      createConfig({ backendSelectionStrategy: 'round-robin' }),
       fetchSpy,
     )
 

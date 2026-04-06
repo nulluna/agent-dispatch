@@ -135,6 +135,7 @@ describe('server', () => {
         proxyUrls: [new URL('http://127.0.0.1:1')],
         requestTimeoutMs: 1000,
         failoverCooldownMs: 1000,
+        backendSelectionStrategy: 'consistent-hashing',
       },
     })
 
@@ -233,6 +234,7 @@ describe('server', () => {
         proxyUrls: [new URL(`http://127.0.0.1:${proxyPort}`)],
         requestTimeoutMs: 1000,
         failoverCooldownMs: 1000,
+        backendSelectionStrategy: 'consistent-hashing',
       },
     })
 

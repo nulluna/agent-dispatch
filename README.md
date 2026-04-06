@@ -6,7 +6,8 @@
 
 - 对外提供 `/s/<host>/<path>`、`/h/<host>/<path>` 代理入口
 - 将请求转发到多个 `agent-proxy` backend
-- 默认使用轮询分流，并在失败时自动切换到下一个 backend
+- 支持 `consistent-hashing` 与 `round-robin` 两种 backend 选择策略
+- 默认使用 `consistent-hashing`，并在失败时自动切换到下一个 backend
 - 对短时间内失败的 backend 做被动冷却，减少连续命中故障节点
 - 重写上游 `3xx` 响应中的 `Location` / `Refresh`
 - 保留状态码、响应头、`Set-Cookie` 与流式 body
@@ -53,6 +54,11 @@
   - 必填
   - 多个 backend URL，逗号分隔
   - 例如：`https://proxy-a.example,https://proxy-b.example/base`
+- `BACKEND_SELECTION_STRATEGY`
+  - 默认：`consistent-hashing`
+  - 可选：`consistent-hashing`、`round-robin`
+  - 控制首次命中的 backend 选择策略
+  - 请求日志会输出最终选中的 backend（`proxyUrl`）
 - `REQUEST_TIMEOUT_MS`
   - 默认：`5000`
   - 单个 backend 尝试的超时时间
@@ -133,6 +139,7 @@ curl -i "http://127.0.0.1:8787/s/example.com/login/start"
 
 ## 边界
 
-- 当前实现为最小可用版本，不包含主动健康检查、权重调度、粘性会话
+- 当前实现为最小可用版本，不包含主动健康检查、权重调度
+- `consistent-hashing` 使用 `protocol + host + pathname` 作为稳定路由 key
 - backend 健康策略为被动冷却，不做独立探活
 - `Location` / `Refresh` 仅对可解析的 `http(s)` 目标做重写
