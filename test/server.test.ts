@@ -4,11 +4,22 @@ import net from 'node:net'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createServer } from '../src/server.js'
+import { handleProxyRequest, type ProxyEnv } from '../../agent-proxy/src/proxy.js'
 
-function createEnv() {
+function createEnv(overrides: Partial<Record<string, string>> = {}) {
   return {
     DISPATCH_SECRET: 'relay-secret',
     AGENT_PROXY_URLS: 'https://proxy-a.example,https://proxy-b.example',
+    ...overrides,
+  }
+}
+
+function createProxyEnv(overrides: Partial<ProxyEnv> = {}): ProxyEnv {
+  return {
+    ROUTE_BASE_PATH: '',
+    SELF_HOSTNAMES: '',
+    DISPATCH_SECRET: 'relay-secret',
+    ...overrides,
   }
 }
 
@@ -36,10 +47,15 @@ async function close(server: Server): Promise<void> {
         reject(error)
         return
       }
-
       resolve()
     })
   })
+}
+
+async function closeAll(servers: Server[]): Promise<void> {
+  for (const server of servers) {
+    await close(server)
+  }
 }
 
 async function sendRawHttpRequest(port: number, payload: string): Promise<string> {
@@ -62,6 +78,8 @@ async function sendHttpRequest(options: {
   port: number
   path: string
   method?: string
+  headers?: Record<string, string>
+  body?: string
   timeoutMs?: number
 }): Promise<{
   statusCode: number
@@ -73,7 +91,7 @@ async function sendHttpRequest(options: {
   timedOut: boolean
   errorMessage: string | null
 }> {
-  const { port, path, method = 'GET', timeoutMs = 200 } = options
+  const { port, path, method = 'GET', headers = {}, body, timeoutMs = 200 } = options
 
   return new Promise((resolve, reject) => {
     const request = http.request({
@@ -81,13 +99,17 @@ async function sendHttpRequest(options: {
       port,
       path,
       method,
+      headers,
     })
 
     request.on('error', reject)
+    if (body) {
+      request.write(body)
+    }
     request.end()
 
     request.on('response', (response) => {
-      let body = ''
+      let responseBody = ''
       let completed = false
       let aborted = false
       let closeHadError = false
@@ -100,7 +122,7 @@ async function sendHttpRequest(options: {
         response.destroy()
       })
       response.on('data', (chunk) => {
-        body += chunk
+        responseBody += chunk
       })
       response.on('aborted', () => {
         aborted = true
@@ -112,7 +134,7 @@ async function sendHttpRequest(options: {
         resolve({
           statusCode: response.statusCode ?? 0,
           headers: response.headers,
-          body,
+          body: responseBody,
           completed,
           aborted,
           closeHadError,
@@ -126,6 +148,132 @@ async function sendHttpRequest(options: {
       })
     })
   })
+}
+
+function getSetCookieValues(headers: Headers): string[] {
+  const getSetCookie = (headers as Headers & { getSetCookie?: () => string[] }).getSetCookie
+  if (typeof getSetCookie === 'function') {
+    return getSetCookie.call(headers)
+  }
+
+  const single = headers.get('set-cookie')
+  return single ? [single] : []
+}
+
+function createProxyServer(options: {
+  env?: ProxyEnv
+  fetchImplementation?: (request: Request) => Promise<Response>
+} = {}): Server {
+  const env = options.env ?? createProxyEnv()
+  const fetchImplementation = options.fetchImplementation ?? ((request: Request) => fetch(request))
+
+  return http.createServer((req, res) => {
+    void (async () => {
+      const protocol =
+        (req.headers['x-forwarded-proto'] as string | undefined)?.split(',')[0]?.trim() || 'http'
+      const host = req.headers.host ?? 'localhost'
+      const url = new URL(req.url ?? '/', `${protocol}://${host}`)
+      const method = req.method ?? 'GET'
+      const chunks: Buffer[] = []
+
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      }
+
+      const body = method !== 'GET' && method !== 'HEAD' && chunks.length > 0 ? Buffer.concat(chunks) : null
+      const proxyRequest = new Request(url, {
+        method,
+        headers: Object.entries(req.headers).flatMap(([key, value]) => {
+          if (typeof value === 'undefined') {
+            return []
+          }
+          return Array.isArray(value)
+            ? value.map((item) => [key, item] as [string, string])
+            : [[key, value] as [string, string]]
+        }),
+        body: body ? new Uint8Array(body) : null,
+        duplex: body ? 'half' : undefined,
+      } as RequestInit & { duplex?: 'half' })
+
+      const response = await handleProxyRequest(proxyRequest, env, fetchImplementation)
+      res.statusCode = response.status
+      res.statusMessage = response.statusText
+
+      response.headers.forEach((value, key) => {
+        if (key.toLowerCase() !== 'set-cookie') {
+          res.setHeader(key, value)
+        }
+      })
+
+      const setCookies = getSetCookieValues(response.headers)
+      if (setCookies.length > 0) {
+        res.setHeader('set-cookie', setCookies)
+      }
+
+      if (!response.body) {
+        res.end()
+        return
+      }
+
+      const reader = response.body.getReader()
+      while (true) {
+        const chunk = await reader.read()
+        if (chunk.done) {
+          break
+        }
+        res.write(Buffer.from(chunk.value))
+      }
+      res.end()
+    })().catch((error) => {
+      res.statusCode = 500
+      res.end(error instanceof Error ? error.message : 'proxy error')
+    })
+  })
+}
+
+function logicalUpstreamHost(upstreamPort: number): string {
+  return `upstream.test:${upstreamPort}`
+}
+
+function makeLocalProxyFetch(upstreamPort: number) {
+  return async (request: Request): Promise<Response> => {
+    const upstreamUrl = new URL(request.url)
+    const originalHost = upstreamUrl.host
+    upstreamUrl.protocol = 'http:'
+    upstreamUrl.hostname = '127.0.0.1'
+    upstreamUrl.port = String(upstreamPort)
+
+    const headers = new Headers(request.headers)
+    headers.set('host', originalHost)
+
+    return fetch(upstreamUrl, {
+      method: request.method,
+      headers,
+      body: request.body,
+      duplex: request.body ? 'half' : undefined,
+      redirect: 'manual',
+    } as RequestInit & { duplex?: 'half' })
+  }
+}
+
+function createLocalDispatchPath(upstreamPort: number, page = '1'): string {
+  return `/h/${encodeURIComponent(logicalUpstreamHost(upstreamPort))}/api/1.0/hlzs/pro/mistake/plan_topics?page=${page}`
+}
+
+function expectedRelayUrl(proxyPort: number, upstreamPort: number, page: string): string {
+  return `http://127.0.0.1:${proxyPort}/relay/relay-secret/h/${encodeURIComponent(logicalUpstreamHost(upstreamPort))}/api/1.0/hlzs/pro/mistake/plan_topics?page=${page}`
+}
+
+function parseLogs(logs: string[]): Array<Record<string, unknown>> {
+  return logs.map((entry) => JSON.parse(entry) as Record<string, unknown>)
+}
+
+function readNodeSetCookies(headers: IncomingHttpHeaders): string[] {
+  const value = headers['set-cookie']
+  if (!value) {
+    return []
+  }
+  return Array.isArray(value) ? value : [value]
 }
 
 afterEach(() => {
@@ -333,6 +481,134 @@ describe('server write-back semantics', () => {
       expect(rawResponse).toContain(`\r\n\r\n${responseBody}`)
     } finally {
       await close(server)
+    }
+  })
+
+  it('runs a real local dispatch -> proxy -> upstream flow for HAR-like POST traffic', async () => {
+    const logs: string[] = []
+    const upstream = http.createServer(async (req, res) => {
+      const chunks: Buffer[] = []
+      for await (const chunk of req) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+      }
+
+      res.statusCode = 200
+      res.setHeader('content-type', 'application/json; charset=utf-8')
+      res.setHeader('x-upstream-ok', 'yes')
+      res.setHeader('set-cookie', ['a=1; Path=/; HttpOnly', 'b=2; Path=/; Secure'])
+      res.end(`ok:${Buffer.concat(chunks).toString('utf8')}`)
+    })
+    const upstreamPort = await listen(upstream)
+    const proxyServer = createProxyServer({
+      env: createProxyEnv({ SELF_HOSTNAMES: 'proxy.internal.test' }),
+      fetchImplementation: makeLocalProxyFetch(upstreamPort),
+    })
+    const proxyPort = await listen(proxyServer)
+    const dispatchServer = createServer({
+      env: createEnv({ AGENT_PROXY_URLS: `http://127.0.0.1:${proxyPort}` }),
+      logWriter: (entry: string) => logs.push(entry),
+    })
+    const dispatchPort = await listen(dispatchServer)
+    const requestBody = JSON.stringify({ planId: 1, topicIds: [1, 2], page: 2 })
+
+    try {
+      const response = await sendHttpRequest({
+        port: dispatchPort,
+        path: createLocalDispatchPath(upstreamPort, '2'),
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          cookie: 'session=abc',
+          'user-agent': 'local-e2e',
+        },
+        body: requestBody,
+        timeoutMs: 500,
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toBe(`ok:${requestBody}`)
+      expect(response.completed).toBe(true)
+      expect(response.aborted).toBe(false)
+      expect(response.timedOut).toBe(false)
+      expect(response.headers['x-upstream-ok']).toBe('yes')
+      expect(readNodeSetCookies(response.headers)).toEqual([
+        'a=1; Path=/; HttpOnly',
+        'b=2; Path=/; Secure',
+      ])
+
+      const entries = parseLogs(logs)
+      expect(entries.find((entry) => entry.event === 'proxy.dispatch.success')).toMatchObject({
+        phase: 'proxy',
+      })
+      expect(entries.find((entry) => entry.event === 'dispatch.response_ready')).toMatchObject({
+        phase: 'request',
+      })
+      expect(entries.find((entry) => entry.event === 'dispatch.write_back_finish')).toMatchObject({
+        phase: 'write_back',
+        proxy: {
+          proxyUrl: `http://127.0.0.1:${proxyPort}/`,
+          relayUrl: expectedRelayUrl(proxyPort, upstreamPort, '2'),
+          attemptCount: 1,
+        },
+      })
+    } finally {
+      await closeAll([dispatchServer, proxyServer, upstream])
+    }
+  })
+
+  it('runs a real local dispatch -> proxy -> upstream streaming flow without client timeout', async () => {
+    const logs: string[] = []
+    const upstream = http.createServer((_req, res) => {
+      res.statusCode = 200
+      res.setHeader('content-type', 'text/plain; charset=utf-8')
+      res.write('a')
+      setTimeout(() => res.write('b'), 5)
+      setTimeout(() => {
+        res.write('c')
+        res.end()
+      }, 10)
+    })
+    const upstreamPort = await listen(upstream)
+    const proxyServer = createProxyServer({
+      env: createProxyEnv({ SELF_HOSTNAMES: 'proxy.internal.test' }),
+      fetchImplementation: makeLocalProxyFetch(upstreamPort),
+    })
+    const proxyPort = await listen(proxyServer)
+    const dispatchServer = createServer({
+      env: createEnv({ AGENT_PROXY_URLS: `http://127.0.0.1:${proxyPort}` }),
+      logWriter: (entry: string) => logs.push(entry),
+    })
+    const dispatchPort = await listen(dispatchServer)
+
+    try {
+      const response = await sendHttpRequest({
+        port: dispatchPort,
+        path: createLocalDispatchPath(upstreamPort, '1'),
+        method: 'GET',
+        headers: {
+          accept: 'text/plain',
+        },
+        timeoutMs: 500,
+      })
+
+      expect(response.statusCode).toBe(200)
+      expect(response.body).toBe('abc')
+      expect(response.completed).toBe(true)
+      expect(response.aborted).toBe(false)
+      expect(response.timedOut).toBe(false)
+
+      const entries = parseLogs(logs)
+      expect(entries.some((entry) => entry.event === 'dispatch.write_back_timeout')).toBe(false)
+      expect(entries.find((entry) => entry.event === 'dispatch.write_back_finish')).toMatchObject({
+        phase: 'write_back',
+        proxy: {
+          proxyUrl: `http://127.0.0.1:${proxyPort}/`,
+          relayUrl: expectedRelayUrl(proxyPort, upstreamPort, '1'),
+          attemptCount: 1,
+        },
+      })
+    } finally {
+      await closeAll([dispatchServer, proxyServer, upstream])
     }
   })
 })
