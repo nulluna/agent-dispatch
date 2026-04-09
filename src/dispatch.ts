@@ -353,14 +353,25 @@ function createTimedResponseBody(
         controller.enqueue(result.value)
       } catch (error) {
         clearTimeout(timeoutId)
+        const errorMessage = error instanceof Error ? error.message : String(error)
         console.warn('[agent-dispatch] relay response bridge failed', {
           requestPath: context.requestPath,
           upstreamUrl: context.upstreamUrl,
           status: response.status,
           contentType: response.headers.get('content-type'),
-          error: error instanceof Error ? error.message : String(error),
+          error: errorMessage,
         })
         await reader.cancel(error).catch(() => undefined)
+
+        if (errorMessage === 'Network connection lost.') {
+          try {
+            controller.close()
+          } catch {
+            // 流已关闭时忽略，避免再把 bridge 错误升级为运行时未捕获异常。
+          }
+          return
+        }
+
         controller.error(error)
       }
     },

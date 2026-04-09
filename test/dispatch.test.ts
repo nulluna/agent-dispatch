@@ -1340,6 +1340,61 @@ describe('handleDispatchRequest', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
+  it('logs and closes the bridge when the upstream body read fails with network connection lost', async () => {
+    const state = createDispatchState()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    let readCount = 0
+
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            pull(controller) {
+              readCount += 1
+
+              if (readCount === 1) {
+                controller.enqueue(new TextEncoder().encode('data: hello\n\n'))
+                return
+              }
+
+              throw new Error('Network connection lost.')
+            },
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'text/event-stream',
+            },
+          },
+        ),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/s/example.com/stream'),
+      createEnv({ RELAY_RESPONSE_TIMEOUT_MS: '50' }),
+      fetchSpy,
+      state,
+    )
+
+    try {
+      expect(response.status).toBe(200)
+      await expect(response.text()).resolves.toBe('data: hello\n\n')
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[agent-dispatch] relay response bridge failed',
+        expect.objectContaining({
+          requestPath: '/s/example.com/stream',
+          upstreamUrl: 'https://example.com/stream',
+          status: 200,
+          contentType: 'text/event-stream',
+          error: 'Network connection lost.',
+        }),
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('does not apply relay response timeout to slow non-streaming JSON error bodies', async () => {
     const state = createDispatchState()
     const fetchSpy = vi.fn(
