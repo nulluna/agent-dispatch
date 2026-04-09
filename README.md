@@ -21,8 +21,8 @@ graph LR
 
     Upstream[目标上游]
 
-    App -- "HTTP<br/>GET /ssl/api.example.com/..." --> AD
-    AD -- "HTTPS<br/>/relay/&lt;secret&gt;/proxyssl/..." --> AP1
+    App -- "HTTP<br/>GET /s/api.example.com/..." --> AD
+    AD -- "HTTPS<br/>/relay/&lt;secret&gt;/s/..." --> AP1
     AD -. "HTTPS<br/>poll / hash 选择" .-> AP2
     AD -. "HTTPS<br/>poll / hash 选择" .-> AP3
     AP1 -- "HTTPS<br/>api.example.com/..." --> Upstream
@@ -43,25 +43,25 @@ graph LR
 |------|------|------|
 | 应用 → agent-dispatch | HTTP | 本地回环，无需加密 |
 | agent-dispatch → agent-proxy | HTTPS | 内部 relay，携带 `DISPATCH_SECRET` |
-| agent-proxy → 目标上游 | HTTP / HTTPS | 由请求路径前缀决定（`proxy/` = HTTP，`proxyssl/` = HTTPS） |
+| agent-proxy → 目标上游 | HTTP / HTTPS | 由协议码表决定（`h` = HTTP，`s` = HTTPS） |
 
 ## 路由语义
 
 ```
-/<site>/<path>?query        →  http://<site>/<path>?query
-/ssl/<site>/<path>?query    →  https://<site>/<path>?query
+/h/<site>/<path>?query      →  http://<site>/<path>?query
+/s/<site>/<path>?query      →  https://<site>/<path>?query
 ```
 
 agent-dispatch 接收到请求后，根据分发策略选中一个 agent-proxy 节点，将请求改写为内部 relay 路径：
 
 ```
 # HTTP 上游
-GET /example.com/search?q=test
-  → https://<agent-proxy>/relay/<DISPATCH_SECRET>/proxy/example.com/search?q=test
+GET /h/example.com/search?q=test
+  → https://<agent-proxy>/relay/<DISPATCH_SECRET>/h/example.com/search?q=test
 
 # HTTPS 上游
-POST /ssl/api.openai.com/v1/responses
-  → https://<agent-proxy>/relay/<DISPATCH_SECRET>/proxyssl/api.openai.com/v1/responses
+POST /s/api.openai.com/v1/responses
+  → https://<agent-proxy>/relay/<DISPATCH_SECRET>/s/api.openai.com/v1/responses
 ```
 
 ## 分发策略
@@ -204,9 +204,9 @@ npm run build        # Wrangler dry-run 构建
 
 ## 迁移指南
 
-1. 在所有 agent-proxy 节点配置相同的 `DISPATCH_SECRET`，确认 `/relay/<secret>/proxyssl/...` 可用
+1. 在所有 agent-proxy 节点配置相同的 `DISPATCH_SECRET`，确认 `/relay/<secret>/s/...` 与 `/relay/<secret>/h/...` 可用
 2. 部署 agent-dispatch，配置 `AGENTPROXY_POOL`、`DISPATCH_STRATEGY`、`DISPATCH_NEGATIVE_CACHE_ENABLED` 和超时参数
-3. 将应用入口从"直连 agent-proxy"切换到"访问本地 agent-dispatch 的 `/<site>/...` 或 `/ssl/<site>/...`"
+3. 将应用入口从"直连 agent-proxy"切换到"访问本地 agent-dispatch 的 `/h/<site>/...` 或 `/s/<site>/...`"
 4. 切换完成后，直接访问 agent-proxy 的旧 `/proxy`、`/proxyssl` 入口将持续返回 `404`
 
 ## 使用说明与免责声明

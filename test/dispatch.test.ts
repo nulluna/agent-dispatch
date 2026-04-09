@@ -56,7 +56,7 @@ describe('handleDispatchRequest', () => {
   it('rewrites an HTTPS ingress path to the internal relay URL', async () => {
     const fetchSpy = vi.fn(async (request: Request) => {
       expect(request.url).toBe(
-        'https://proxy-a.internal/relay/relay-secret/proxyssl/api.openai.com/v1/responses?model=gpt-4.1',
+        'https://proxy-a.internal/relay/relay-secret/s/api.openai.com/v1/responses?model=gpt-4.1',
       )
       expect(request.method).toBe('POST')
       expect(request.headers.get('authorization')).toBe('Bearer abc')
@@ -67,7 +67,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses?model=gpt-4.1', {
+      createRequest('/s/api.openai.com/v1/responses?model=gpt-4.1', {
         method: 'POST',
         headers: {
           Authorization: 'Bearer abc',
@@ -88,14 +88,14 @@ describe('handleDispatchRequest', () => {
   it('rewrites an HTTP ingress path to the internal proxy relay URL', async () => {
     const fetchSpy = vi.fn(async (request: Request) => {
       expect(request.url).toBe(
-        'https://proxy-a.internal/relay/relay-secret/proxy/example.com/search?q=test',
+        'https://proxy-a.internal/relay/relay-secret/h/example.com/search?q=test',
       )
 
       return new Response('http-ok', { status: 200 })
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/example.com/search?q=test'),
+      createRequest('/h/example.com/search?q=test'),
       createEnv(),
       fetchSpy,
     )
@@ -107,20 +107,56 @@ describe('handleDispatchRequest', () => {
   it('preserves a trailing slash when relaying ingress paths', async () => {
     const fetchSpy = vi.fn(async (request: Request) => {
       expect(request.url).toBe(
-        'https://proxy-a.internal/relay/relay-secret/proxyssl/anyrouter.top/api/token/?p=0&size=100',
+        'https://proxy-a.internal/relay/relay-secret/s/anyrouter.top/api/token/?p=0&size=100',
       )
 
       return new Response('slash-ok', { status: 200 })
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100'),
+      createRequest('/s/anyrouter.top/api/token/?p=0&size=100'),
       createEnv(),
       fetchSpy,
     )
 
     expect(response.status).toBe(200)
     expect(await response.text()).toBe('slash-ok')
+  })
+
+  it('rejects the former /ssl ingress path as an invalid protocol code', async () => {
+    const fetchSpy = vi.fn()
+
+    const response = await handleDispatchRequest(
+      createRequest('/ssl/api.openai.com/v1/responses'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(400)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: 'INVALID_PROTOCOL_CODE',
+      },
+    })
+  })
+
+  it('rejects the former implicit http ingress path as an invalid protocol code', async () => {
+    const fetchSpy = vi.fn()
+
+    const response = await handleDispatchRequest(
+      createRequest('/example.com/search?q=test'),
+      createEnv(),
+      fetchSpy,
+    )
+
+    expect(response.status).toBe(400)
+    expect(fetchSpy).not.toHaveBeenCalled()
+    await expect(response.json()).resolves.toMatchObject({
+      error: {
+        code: 'INVALID_PROTOCOL_CODE',
+      },
+    })
   })
 
   it('reuses the challenge backend for hash token requests with the same challenge cookie', async () => {
@@ -148,7 +184,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const challengeResponse = await handleDispatchRequest(
-      createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100'),
+      createRequest('/s/anyrouter.top/api/token/?p=0&size=100'),
       env,
       fetchSpy,
       state,
@@ -162,7 +198,7 @@ describe('handleDispatchRequest', () => {
     ])
 
     const tokenResponse = await handleDispatchRequest(
-      createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100', {
+      createRequest('/s/anyrouter.top/api/token/?p=0&size=100', {
         headers: {
           Cookie: 'acw_tc=challenge-x; cdn_sec_tc=challenge-x',
         },
@@ -205,7 +241,7 @@ describe('handleDispatchRequest', () => {
       })
 
       const challengeResponse = await handleDispatchRequest(
-        createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100'),
+        createRequest('/s/anyrouter.top/api/token/?p=0&size=100'),
         env,
         fetchSpy,
         state,
@@ -221,7 +257,7 @@ describe('handleDispatchRequest', () => {
       vi.advanceTimersByTime(8_001)
 
       const tokenResponse = await handleDispatchRequest(
-        createRequest('/ssl/anyrouter.top/api/token/?p=0&size=100', {
+        createRequest('/s/anyrouter.top/api/token/?p=0&size=100', {
           headers: {
             Cookie: 'acw_tc=challenge-x; cdn_sec_tc=challenge-x',
           },
@@ -245,7 +281,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses'),
+        createRequest('/s/api.openai.com/v1/responses'),
         createEnv({ DISPATCH_STRATEGY: 'hash' }),
         fetchSpy,
       )
@@ -269,7 +305,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses', {
+        createRequest('/s/api.openai.com/v1/responses', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -287,7 +323,7 @@ describe('handleDispatchRequest', () => {
       expect(response.status).toBe(200)
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /^\[wrangler:info\] POST \/ssl\/api\.openai\.com\/v1\/responses 200 OK \(\d+ms\)$/,
+          /^\[wrangler:info\] POST \/s\/api\.openai\.com\/v1\/responses 200 OK \(\d+ms\)$/,
         ),
         expect.objectContaining({
           protocol: 'openai-responses',
@@ -306,7 +342,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses', {
+        createRequest('/s/api.openai.com/v1/responses', {
           headers: {
             Authorization: 'Bearer abc',
             'User-Agent': 'dispatch-test',
@@ -333,7 +369,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses?stream=true', {
+        createRequest('/s/api.openai.com/v1/responses?stream=true', {
           headers: {
             Authorization: 'Bearer abc',
             'User-Agent': 'dispatch-test',
@@ -382,7 +418,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses?stream=true', {
+        createRequest('/s/api.openai.com/v1/responses?stream=true', {
           headers: {
             'New-Api-User': 'user-123',
             Authorization: 'Bearer abc',
@@ -420,7 +456,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses', {
+        createRequest('/s/api.openai.com/v1/responses', {
           headers: {
             'X-Access-Token': 'secret-token',
             'Proxy-Authorization': 'internal-proxy-token',
@@ -449,7 +485,7 @@ describe('handleDispatchRequest', () => {
     }
   })
 
-  it.each(['/', '/ssl'])(
+  it.each(['/', '/s', '/h'])(
     'rejects a missing authority before contacting agentproxy: %s',
     async (path) => {
       const fetchSpy = vi.fn()
@@ -474,7 +510,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn()
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/https:%2F%2Fbad/v1/chat'),
+      createRequest('/s/https:%2F%2Fbad/v1/chat'),
       createEnv(),
       fetchSpy,
     )
@@ -492,7 +528,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn()
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com'),
+      createRequest('/s/example.com'),
       createEnv({ AGENTPROXY_POOL: 'http://proxy-a.internal' }),
       fetchSpy,
     )
@@ -531,7 +567,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/stream.example.com/events'),
+      createRequest('/s/stream.example.com/events'),
       createEnv(),
       fetchSpy,
     )
@@ -557,19 +593,19 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
 
     expect(response.status).toBe(301)
     expect(response.headers.get('location')).toBe(
-      'http://dispatch.example.com/ssl/login.example.com/oauth/start?client_id=abc',
+      'http://dispatch.example.com/s/login.example.com/oauth/start?client_id=abc',
     )
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 
-  it('rewrites an absolute http Location through CURRENT_DOMAIN without /ssl', async () => {
+  it('rewrites an absolute http Location through CURRENT_DOMAIN with /h', async () => {
     const fetchSpy = vi.fn(
       async () =>
         new Response(null, {
@@ -581,14 +617,14 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/account/profile'),
+      createRequest('/s/api.openai.com/account/profile'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
 
     expect(response.status).toBe(301)
     expect(response.headers.get('location')).toBe(
-      'http://dispatch.example.com/legacy.example.com/signin?from=dispatch',
+      'http://dispatch.example.com/h/legacy.example.com/signin?from=dispatch',
     )
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
@@ -605,14 +641,14 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/account/profile'),
+      createRequest('/s/api.openai.com/account/profile'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
 
     expect(response.status).toBe(301)
     expect(response.headers.get('location')).toBe(
-      'http://dispatch.example.com/ssl/api.openai.com/login?next=%2Fhome',
+      'http://dispatch.example.com/s/api.openai.com/login?next=%2Fhome',
     )
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
@@ -629,14 +665,14 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
 
     expect(response.status).toBe(200)
     expect(response.headers.get('refresh')).toBe(
-      '0; url="http://dispatch.example.com/ssl/login.example.com/oauth/start?client_id=abc"',
+      '0; url="http://dispatch.example.com/s/login.example.com/oauth/start?client_id=abc"',
     )
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
@@ -653,14 +689,14 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/account/profile'),
+      createRequest('/s/api.openai.com/account/profile'),
       createEnv(),
       fetchSpy,
     )
 
     expect(response.status).toBe(301)
     expect(response.headers.get('location')).toBe(
-      '/ssl/api.openai.com/login?next=%2Fhome',
+      '/s/api.openai.com/login?next=%2Fhome',
     )
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
@@ -677,7 +713,7 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/account/profile'),
+      createRequest('/s/api.openai.com/account/profile'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
@@ -693,20 +729,20 @@ describe('handleDispatchRequest', () => {
         new Response(null, {
           status: 301,
           headers: {
-            Location: '/ssl/login.example.com/oauth/start?client_id=abc',
+            Location: '/s/login.example.com/oauth/start?client_id=abc',
           },
         }),
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
 
     expect(response.status).toBe(301)
     expect(response.headers.get('location')).toBe(
-      'http://dispatch.example.com/ssl/login.example.com/oauth/start?client_id=abc',
+      'http://dispatch.example.com/s/login.example.com/oauth/start?client_id=abc',
     )
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
@@ -723,7 +759,7 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
@@ -736,7 +772,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv(),
       fetchSpy,
     )
@@ -757,7 +793,7 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv({ CURRENT_DOMAIN: 'dispatch.example.com' }),
       fetchSpy,
     )
@@ -776,7 +812,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const first = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/models', {
+      createRequest('/s/api.openai.com/v1/models', {
         headers: { Authorization: 'Bearer abc' },
       }),
       env,
@@ -784,7 +820,7 @@ describe('handleDispatchRequest', () => {
       state,
     )
     const second = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/models', {
+      createRequest('/s/api.openai.com/v1/models', {
         headers: { Authorization: 'Bearer abc' },
       }),
       env,
@@ -810,7 +846,7 @@ describe('handleDispatchRequest', () => {
       })
 
       await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/models', {
+        createRequest('/s/api.openai.com/v1/models', {
           headers: { Authorization: 'Bearer abc' },
         }),
         env,
@@ -821,7 +857,7 @@ describe('handleDispatchRequest', () => {
       vi.advanceTimersByTime(60 * 60 * 1000 + 1)
 
       await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/models', {
+        createRequest('/s/api.openai.com/v1/models', {
           headers: { Authorization: 'Bearer abc' },
         }),
         env,
@@ -849,7 +885,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses'),
+        createRequest('/s/api.openai.com/v1/responses'),
         createEnv(),
         fetchSpy,
       )
@@ -857,10 +893,10 @@ describe('handleDispatchRequest', () => {
       expect(response.status).toBe(301)
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /^\[wrangler:info\] GET \/ssl\/api\.openai\.com\/v1\/responses 301 Moved Permanently \(\d+ms\)$/,
+          /^\[wrangler:info\] GET \/s\/api\.openai\.com\/v1\/responses 301 Moved Permanently \(\d+ms\)$/,
         ),
         expect.objectContaining({
-          location: '/ssl/login.example.com/oauth/start?client_id=abc',
+          location: '/s/login.example.com/oauth/start?client_id=abc',
         }),
       )
     } finally {
@@ -880,7 +916,7 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv(),
       fetchSpy,
     )
@@ -894,14 +930,14 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl'),
+        createRequest('/s'),
         createEnv(),
       )
 
       expect(response.status).toBe(400)
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /^\[wrangler:info\] GET \/ssl 400 Bad Request \(\d+ms\)$/,
+          /^\[wrangler:info\] GET \/s 400 Bad Request \(\d+ms\)$/,
         ),
         expect.objectContaining({
           error: 'MISSING_AUTHORITY',
@@ -935,7 +971,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses'),
+        createRequest('/s/api.openai.com/v1/responses'),
         createEnv(),
         fetchSpy,
       )
@@ -943,7 +979,7 @@ describe('handleDispatchRequest', () => {
       expect(response.status).toBe(401)
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /^\[wrangler:info\] GET \/ssl\/api\.openai\.com\/v1\/responses 401 Unauthorized \(\d+ms\)$/,
+          /^\[wrangler:info\] GET \/s\/api\.openai\.com\/v1\/responses 401 Unauthorized \(\d+ms\)$/,
         ),
         expect.objectContaining({
           error: 'invalid_api_key',
@@ -977,7 +1013,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/chat/completions', {
+        createRequest('/s/api.openai.com/v1/chat/completions', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -995,7 +1031,7 @@ describe('handleDispatchRequest', () => {
       expect(response.status).toBe(401)
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /^\[wrangler:info\] POST \/ssl\/api\.openai\.com\/v1\/chat\/completions 401 Unauthorized \(\d+ms\)$/,
+          /^\[wrangler:info\] POST \/s\/api\.openai\.com\/v1\/chat\/completions 401 Unauthorized \(\d+ms\)$/,
         ),
         expect.objectContaining({
           protocol: 'openai-chat-completions',
@@ -1032,7 +1068,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/api.openai.com/v1/responses'),
+        createRequest('/s/api.openai.com/v1/responses'),
         createEnv(),
         fetchSpy,
       )
@@ -1040,7 +1076,7 @@ describe('handleDispatchRequest', () => {
       expect(response.status).toBe(502)
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /^\[wrangler:info\] GET \/ssl\/api\.openai\.com\/v1\/responses 502 Bad Gateway \(\d+ms\)$/,
+          /^\[wrangler:info\] GET \/s\/api\.openai\.com\/v1\/responses 502 Bad Gateway \(\d+ms\)$/,
         ),
         expect.objectContaining({
           error: 'upstream_unavailable',
@@ -1060,7 +1096,7 @@ describe('handleDispatchRequest', () => {
 
     try {
       const response = await handleDispatchRequest(
-        createRequest('/ssl/example.com/v1/chat'),
+        createRequest('/s/example.com/v1/chat'),
         createEnv(),
         fetchSpy,
       )
@@ -1068,7 +1104,7 @@ describe('handleDispatchRequest', () => {
       expect(response.status).toBe(502)
       expect(infoSpy).toHaveBeenCalledWith(
         expect.stringMatching(
-          /^\[wrangler:info\] GET \/ssl\/example\.com\/v1\/chat 502 Bad Gateway \(\d+ms\)$/,
+          /^\[wrangler:info\] GET \/s\/example\.com\/v1\/chat 502 Bad Gateway \(\d+ms\)$/,
         ),
         expect.objectContaining({
           error: 'RELAY_FETCH_FAILED',
@@ -1087,7 +1123,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com/v1/chat'),
+      createRequest('/s/example.com/v1/chat'),
       createEnv({
         AGENTPROXY_POOL: 'https://proxy-a.internal,https://proxy-b.internal',
       }),
@@ -1116,7 +1152,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn(() => new Promise<Response>(() => undefined))
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com/v1/chat'),
+      createRequest('/s/example.com/v1/chat'),
       createEnv({ RELAY_CONNECT_TIMEOUT_MS: '5' }),
       fetchSpy,
       state,
@@ -1148,7 +1184,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com/v1/chat'),
+      createRequest('/s/example.com/v1/chat'),
       createEnv({ RELAY_CONNECT_TIMEOUT_MS: '5' }),
       fetchSpy,
       state,
@@ -1169,7 +1205,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com/v1/chat'),
+      createRequest('/s/example.com/v1/chat'),
       createEnv({ DNS_RESOLVE: 'proxy-a.internal=1.2.3.4' }),
       fetchSpy,
       state,
@@ -1200,7 +1236,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com/v1/chat'),
+      createRequest('/s/example.com/v1/chat'),
       createEnv({ DNS_RESOLVE: 'unrelated.host=1.2.3.4' }),
       fetchSpy,
       state,
@@ -1221,7 +1257,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com/v1/chat'),
+      createRequest('/s/example.com/v1/chat'),
       createEnv(),
       fetchSpy,
       state,
@@ -1249,7 +1285,7 @@ describe('handleDispatchRequest', () => {
     )
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/example.com/stream'),
+      createRequest('/s/example.com/stream'),
       createEnv({ RELAY_RESPONSE_TIMEOUT_MS: '5' }),
       fetchSpy,
       state,
@@ -1264,7 +1300,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv(),
       fetchSpy,
     )
@@ -1277,7 +1313,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn()
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses'),
+      createRequest('/s/api.openai.com/v1/responses'),
       createEnv({ DISPATCH_INGRESS_KEY: 'correct-key' }),
       fetchSpy,
     )
@@ -1293,7 +1329,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn()
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses', {
+      createRequest('/s/api.openai.com/v1/responses', {
         headers: { 'x-dispatch-token': 'wrong-key' },
       }),
       createEnv({ DISPATCH_INGRESS_KEY: 'correct-key' }),
@@ -1311,7 +1347,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses', {
+      createRequest('/s/api.openai.com/v1/responses', {
         headers: {
           'x-dispatch-token': 'correct-key',
           Authorization: 'Bearer abc',
@@ -1329,7 +1365,7 @@ describe('handleDispatchRequest', () => {
     const fetchSpy = vi.fn(async () => new Response('ok', { status: 200 }))
 
     const response = await handleDispatchRequest(
-      createRequest('/ssl/api.openai.com/v1/responses', {
+      createRequest('/s/api.openai.com/v1/responses', {
         headers: {
           'x-my-project-auth': 'correct-key',
           Authorization: 'Bearer abc',
@@ -1364,7 +1400,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const makeRequest = () =>
-      createRequest('/ssl/api.openai.com/v1/responses?model=gpt-4', {
+      createRequest('/s/api.openai.com/v1/responses?model=gpt-4', {
         headers: { Authorization: 'Bearer test-key' },
       })
 
@@ -1402,7 +1438,7 @@ describe('handleDispatchRequest', () => {
     } as DispatchEnv & { DISPATCH_NEGATIVE_CACHE_ENABLED: string }
 
     const makeRequest = () =>
-      createRequest('/ssl/api.openai.com/v1/responses?model=gpt-4', {
+      createRequest('/s/api.openai.com/v1/responses?model=gpt-4', {
         headers: { Authorization: 'Bearer test-key' },
       })
 
@@ -1453,7 +1489,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const makeRequest = () =>
-      createRequest('/ssl/anyrouter.top/v1/models', {
+      createRequest('/s/anyrouter.top/v1/models', {
         headers: { Authorization: 'Bearer test-key' },
       })
 
@@ -1492,7 +1528,7 @@ describe('handleDispatchRequest', () => {
       })
 
       // 无 auth header → site-fallback 模式
-      const makeRequest = () => createRequest('/ssl/api.example.com/v1/resource')
+      const makeRequest = () => createRequest('/s/api.example.com/v1/resource')
 
       // 第一次请求
       const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
@@ -1532,7 +1568,7 @@ describe('handleDispatchRequest', () => {
       DISPATCH_NEGATIVE_CACHE_ENABLED: 'true',
     })
 
-    const makeRequest = () => createRequest('/ssl/anyrouter.top/api/user/self')
+    const makeRequest = () => createRequest('/s/anyrouter.top/api/user/self')
 
     try {
       const response1 = await handleDispatchRequest(makeRequest(), env, fetchSpy, state)
@@ -1569,7 +1605,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const makeRequest = () =>
-      createRequest('/ssl/api.openai.com/v1/responses', {
+      createRequest('/s/api.openai.com/v1/responses', {
         headers: { Authorization: 'Bearer test-key' },
       })
 
@@ -1612,7 +1648,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const makeRequest = () =>
-      createRequest('/ssl/api.openai.com/v1/chat', {
+      createRequest('/s/api.openai.com/v1/chat', {
         headers: { Authorization: 'Bearer test-key' },
       })
 
@@ -1646,7 +1682,7 @@ describe('handleDispatchRequest', () => {
     })
 
     const makeRequest = () =>
-      createRequest('/ssl/api.openai.com/v1/responses', {
+      createRequest('/s/api.openai.com/v1/responses', {
         headers: { Authorization: 'Bearer test-key' },
       })
 
@@ -1685,7 +1721,7 @@ describe('handleDispatchRequest', () => {
       })
 
       const makeRequest = () =>
-        createRequest('/ssl/api.openai.com/v1/responses', {
+        createRequest('/s/api.openai.com/v1/responses', {
           headers: { Authorization: 'Bearer test-key' },
         })
 
@@ -1744,7 +1780,7 @@ describe('handleDispatchRequest', () => {
       })
 
       const makeRequest = () =>
-        createRequest('/ssl/anyrouter.top/v1/models', {
+        createRequest('/s/anyrouter.top/v1/models', {
           headers: { Authorization: 'Bearer test-key' },
         })
 

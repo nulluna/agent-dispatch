@@ -278,7 +278,7 @@ function buildRelayUrl(
   targetAuthority: string,
   upstreamUrl: URL,
 ): URL {
-  const relayPrefix = upstreamUrl.protocol === 'https:' ? 'proxyssl' : 'proxy'
+  const relayPrefix = upstreamUrl.protocol === 'https:' ? 's' : 'h'
   const relayUrl = new URL(proxyBaseUrl)
   const basePath = relayUrl.pathname === '/' ? '' : relayUrl.pathname.replace(/\/+$/g, '')
 
@@ -361,13 +361,13 @@ function createTimedResponseBody(
 
 function buildDispatchPathFromUrl(targetUrl: URL): string {
   const authority = encodeURIComponent(targetUrl.host)
-  const prefix = targetUrl.protocol === 'https:' ? '/ssl' : ''
+  const prefix = targetUrl.protocol === 'https:' ? '/s' : '/h'
 
   return `${prefix}/${authority}${targetUrl.pathname}${targetUrl.search}${targetUrl.hash}`
 }
 
 function isAlreadyDispatchedPath(location: string): boolean {
-  return /^\/(?:ssl\/)?[^/?#]+(?:[/?#]|$)/.test(location)
+  return /^\/(?:s|h)\/[^/?#]+(?:[/?#]|$)/.test(location)
 }
 
 function toCurrentDomainUrl(path: string, currentDomain: string): string {

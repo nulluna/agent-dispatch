@@ -48,6 +48,22 @@ function validateAuthority(authority: string, protocol: UpstreamProtocol): URL {
   return upstreamUrl
 }
 
+function resolveProtocolFromCode(protocolCode: string): UpstreamProtocol {
+  if (protocolCode === 's') {
+    return 'https'
+  }
+
+  if (protocolCode === 'h') {
+    return 'http'
+  }
+
+  throw new DispatchError(
+    400,
+    'INVALID_PROTOCOL_CODE',
+    '入口路径必须以 /s/<authority>/... 或 /h/<authority>/... 开头',
+  )
+}
+
 export function resolveIngressRequest(requestUrl: URL): ResolvedIngress {
   const segments = requestUrl.pathname.split('/').filter(Boolean)
   const hasTrailingSlash = requestUrl.pathname.length > 1 && requestUrl.pathname.endsWith('/')
@@ -56,18 +72,16 @@ export function resolveIngressRequest(requestUrl: URL): ResolvedIngress {
     throw new DispatchError(400, 'MISSING_AUTHORITY', '缺少上游 authority')
   }
 
-  const useHttps = segments[0] === 'ssl'
-  const authoritySegment = useHttps ? segments[1] : segments[0]
+  const protocol = resolveProtocolFromCode(segments[0] ?? '')
+  const authoritySegment = segments[1]
 
   if (!authoritySegment) {
     throw new DispatchError(400, 'MISSING_AUTHORITY', '缺少上游 authority')
   }
 
-  const protocol: UpstreamProtocol = useHttps ? 'https' : 'http'
   const authority = decodeAuthority(authoritySegment)
   const upstreamUrl = validateAuthority(authority, protocol)
-  const pathStartIndex = useHttps ? 2 : 1
-  const pathSegments = segments.slice(pathStartIndex)
+  const pathSegments = segments.slice(2)
 
   if (pathSegments.length === 0) {
     upstreamUrl.pathname = '/'
