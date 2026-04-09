@@ -1269,6 +1269,7 @@ describe('handleDispatchRequest', () => {
 
   it('fails the client stream when the relay response body exceeds the configured timeout', async () => {
     const state = createDispatchState()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
     const fetchSpy = vi.fn(
       async () =>
         new Response(
@@ -1291,8 +1292,93 @@ describe('handleDispatchRequest', () => {
       state,
     )
 
+    try {
+      expect(response.status).toBe(200)
+      await expect(response.text()).rejects.toThrow('内部 relay 响应超时')
+      expect(fetchSpy).toHaveBeenCalledTimes(1)
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[agent-dispatch] relay response bridge failed',
+        expect.objectContaining({
+          requestPath: '/s/example.com/stream',
+          upstreamUrl: 'https://example.com/stream',
+          status: 200,
+          contentType: 'text/event-stream',
+          error: '内部 relay 响应超时',
+        }),
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('keeps relay response timeout for ndjson streaming responses', async () => {
+    const state = createDispatchState()
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start() {},
+          }),
+          {
+            status: 200,
+            headers: {
+              'content-type': 'application/x-ndjson',
+            },
+          },
+        ),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/s/ollama.local/api/generate'),
+      createEnv({ RELAY_RESPONSE_TIMEOUT_MS: '5' }),
+      fetchSpy,
+      state,
+    )
+
     expect(response.status).toBe(200)
     await expect(response.text()).rejects.toThrow('内部 relay 响应超时')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not apply relay response timeout to slow non-streaming JSON error bodies', async () => {
+    const state = createDispatchState()
+    const fetchSpy = vi.fn(
+      async () =>
+        new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode('{"error":{"message":"An error occurred while processing'),
+              )
+
+              setTimeout(() => {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    ' your request.","request_id":"req_123"}}',
+                  ),
+                )
+                controller.close()
+              }, 20)
+            },
+          }),
+          {
+            status: 500,
+            headers: {
+              'content-type': 'application/json; charset=utf-8',
+            },
+          },
+        ),
+    )
+
+    const response = await handleDispatchRequest(
+      createRequest('/s/api.openai.com/v1/responses'),
+      createEnv({ RELAY_RESPONSE_TIMEOUT_MS: '5' }),
+      fetchSpy,
+      state,
+    )
+
+    expect(response.status).toBe(500)
+    await expect(response.text()).resolves.toContain('An error occurred while processing your request.')
     expect(fetchSpy).toHaveBeenCalledTimes(1)
   })
 

@@ -317,6 +317,10 @@ function createRelayRequestFactory(
 function createTimedResponseBody(
   response: Response,
   timeoutMs: number,
+  context: {
+    requestPath: string
+    upstreamUrl: string
+  },
 ): ReadableStream<Uint8Array> | null {
   if (response.body === null) {
     return null
@@ -349,6 +353,13 @@ function createTimedResponseBody(
         controller.enqueue(result.value)
       } catch (error) {
         clearTimeout(timeoutId)
+        console.warn('[agent-dispatch] relay response bridge failed', {
+          requestPath: context.requestPath,
+          upstreamUrl: context.upstreamUrl,
+          status: response.status,
+          contentType: response.headers.get('content-type'),
+          error: error instanceof Error ? error.message : String(error),
+        })
         await reader.cancel(error).catch(() => undefined)
         controller.error(error)
       }
@@ -357,6 +368,18 @@ function createTimedResponseBody(
       await reader.cancel(reason).catch(() => undefined)
     },
   })
+}
+
+const STREAMING_RESPONSE_CONTENT_TYPES = [
+  'text/event-stream',
+  'application/x-ndjson',
+  'application/json-seq',
+]
+
+function shouldApplyRelayResponseTimeout(response: Response): boolean {
+  const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
+
+  return STREAMING_RESPONSE_CONTENT_TYPES.some(type => contentType.startsWith(type))
 }
 
 function buildDispatchPathFromUrl(targetUrl: URL): string {
@@ -443,10 +466,18 @@ function createClientResponseHeaders(
 function createClientResponse(
   response: Response,
   timeoutMs: number,
+  requestPath: string,
   upstreamUrl: URL,
   currentDomain: string,
 ): Response {
-  return new Response(createTimedResponseBody(response, timeoutMs), {
+  const body = shouldApplyRelayResponseTimeout(response)
+    ? createTimedResponseBody(response, timeoutMs, {
+        requestPath,
+        upstreamUrl: upstreamUrl.toString(),
+      })
+    : response.body
+
+  return new Response(body, {
     status: response.status,
     statusText: response.statusText,
     headers: createClientResponseHeaders(response, upstreamUrl, currentDomain),
@@ -935,6 +966,7 @@ export async function handleDispatchRequest(
       createClientResponse(
         relayResponse,
         config.relayResponseTimeoutMs,
+        formatRequestPath(requestUrl),
         ingress.upstreamUrl,
         config.currentDomain,
       ),
